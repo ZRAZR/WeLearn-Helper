@@ -2,12 +2,16 @@
 账号管理视图
 主界面核心组件 - 显示账号列表、状态和操作按钮
 """
+import os
+import sys
+import pandas as pd
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
     QTableWidget, QTableWidgetItem, QLabel, QFileDialog, QMessageBox,
     QLineEdit, QDialog, QHeaderView, QAbstractItemView
 )
+from PyQt5.QtGui import QPixmap, QPainter, QBrush, QColor
 from core.account_manager import AccountManager, Account
 
 
@@ -19,31 +23,32 @@ class AddAccountDialog(QDialog):
         self.setWindowTitle("添加账号")
         self.setModal(True)
         self.setMinimumWidth(300)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.init_ui()
+        self.set_background()
     
     def init_ui(self):
         layout = QVBoxLayout(self)
         
-        # 用户名
         self.username_input = QLineEdit()
         self.username_input.setPlaceholderText("用户名")
+        self.set_input_transparency(self.username_input)
         layout.addWidget(QLabel("用户名:"))
         layout.addWidget(self.username_input)
         
-        # 密码
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("密码")
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.set_input_transparency(self.password_input)
         layout.addWidget(QLabel("密码:"))
         layout.addWidget(self.password_input)
         
-        # 昵称（可选）
         self.nickname_input = QLineEdit()
         self.nickname_input.setPlaceholderText("昵称（可选，方便识别）")
+        self.set_input_transparency(self.nickname_input)
         layout.addWidget(QLabel("昵称:"))
         layout.addWidget(self.nickname_input)
         
-        # 按钮
         button_layout = QHBoxLayout()
         ok_btn = QPushButton("确定")
         cancel_btn = QPushButton("取消")
@@ -53,12 +58,54 @@ class AddAccountDialog(QDialog):
         button_layout.addWidget(cancel_btn)
         layout.addLayout(button_layout)
     
+    def set_input_transparency(self, input_widget):
+        """设置输入框为半透明样式"""
+        input_widget.setStyleSheet("""
+            QLineEdit {
+                background-color: rgba(255, 255, 255, 180);
+                border: 1px solid rgba(200, 200, 200, 200);
+                border-radius: 5px;
+                padding: 5px;
+                color: #333333;
+            }
+            QLineEdit:focus {
+                border: 1px solid rgba(100, 150, 255, 200);
+                background-color: rgba(255, 255, 255, 200);
+            }
+        """)
+    
     def get_values(self):
         return (
             self.username_input.text().strip(),
             self.password_input.text().strip(),
             self.nickname_input.text().strip()
         )
+    
+    def set_background(self):
+        if getattr(sys, 'frozen', False):
+            if hasattr(sys, '_MEIPASS'):
+                app_path = sys._MEIPASS
+            else:
+                app_path = os.path.dirname(sys.executable)
+                if not os.path.exists(os.path.join(app_path, 'ZR.ico')):
+                    internal_path = os.path.join(app_path, '_internal')
+                    if os.path.exists(os.path.join(internal_path, 'ZR.ico')):
+                        app_path = internal_path
+        else:
+            app_path = os.path.dirname(os.path.abspath(__file__))
+            app_path = os.path.dirname(app_path)
+        
+        bg_path = os.path.join(app_path, 'ZR.png')
+        if os.path.exists(bg_path):
+            pixmap = QPixmap(bg_path)
+            palette = self.palette()
+            palette.setBrush(self.backgroundRole(), QBrush(pixmap.scaled(
+                self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)))
+            self.setPalette(palette)
+    
+    def resizeEvent(self, event):
+        self.set_background()
+        super().resizeEvent(event)
 
 
 class AccountView(QWidget):
@@ -67,41 +114,41 @@ class AccountView(QWidget):
     主界面的核心组件，显示账号列表并提供操作
     """
     
-    # 信号：请求打开账号详情
     open_detail_requested = pyqtSignal(Account)
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.account_manager = AccountManager()
         self.init_ui()
+        self.set_background()
     
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         
-        # ========== 工具栏 ==========
         toolbar_layout = QHBoxLayout()
         
         self.add_btn = QPushButton("➕ 添加账号")
         self.delete_btn = QPushButton("🗑️ 删除选中")
+        self.excel_import_btn = QPushButton("批量导入")
         
         self.add_btn.clicked.connect(self.add_account)
         self.delete_btn.clicked.connect(self.delete_selected)
+        self.excel_import_btn.clicked.connect(self.import_accounts)
         
         toolbar_layout.addWidget(self.add_btn)
         toolbar_layout.addWidget(self.delete_btn)
+        toolbar_layout.addWidget(self.excel_import_btn)
         toolbar_layout.addStretch()
         
         layout.addLayout(toolbar_layout)
         
-        # ========== 账号表格 ==========
         self.account_table = QTableWidget()
         self.account_table.setColumnCount(6)
         self.account_table.setHorizontalHeaderLabels([
             '用户名', '昵称', '状态', '目标课程', '进度', '操作'
         ])
         
-        # 设置表格属性
         header = self.account_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -114,12 +161,10 @@ class AccountView(QWidget):
         self.account_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.account_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         
-        # 双击打开详情
-        self.account_table.doubleClicked.connect(self.on_row_double_clicked)
+        self.account_table.itemDoubleClicked.connect(self.open_detail)
         
         layout.addWidget(self.account_table)
         
-        # ========== 状态栏 ==========
         status_layout = QHBoxLayout()
         self.status_label = QLabel("账号数: 0")
         self.running_label = QLabel("运行中: 0")
@@ -147,17 +192,69 @@ class AccountView(QWidget):
     
     def import_accounts(self):
         """从文件导入账号"""
+        QMessageBox.information(
+            self, 
+            "批量导入", 
+            "请选择Excel文件进行批量导入\n\n"
+            "Excel文件格式要求：\n"
+            "• 必须包含\"用户名\"和\"密码\"列\n"
+            "• 可选包含\"昵称\"列\n"
+            "• 支持中英文列名（用户名/username，密码/password，昵称/nickname）"
+        )
+        
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "选择账号文件", "", "文本文件 (*.txt);;CSV文件 (*.csv)"
+            self, "选择Excel文件", "", "Excel文件 (*.xlsx *.xls)"
         )
         
         if filepath:
-            count, error = self.account_manager.import_from_file(filepath)
-            if error:
-                QMessageBox.warning(self, "导入失败", error)
+            if filepath.endswith(('.xlsx', '.xls')):
+                count, error = self.import_from_excel(filepath)
+                if error:
+                    QMessageBox.warning(self, "导入失败", error)
+                else:
+                    self.refresh_table()
+                    QMessageBox.information(self, "导入成功", f"成功导入 {count} 个账号")
             else:
-                self.refresh_table()
-                QMessageBox.information(self, "导入成功", f"成功导入 {count} 个账号")
+                QMessageBox.warning(self, "文件格式错误", "请选择Excel文件（.xlsx或.xls格式）")
+    
+    def import_from_excel(self, filepath):
+        """从Excel文件导入账号"""
+        try:
+            df = pd.read_excel(filepath, engine='openpyxl')
+            
+            required_columns = ['用户名', '密码']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            
+            if missing_columns:
+                english_columns = ['username', 'password']
+                missing_english = [col for col in english_columns if col not in df.columns]
+                
+                if missing_english:
+                    return 0, f"Excel文件中缺少必要的列: {', '.join(missing_columns)} 或 {', '.join(english_columns)}"
+                
+                username_col = 'username'
+                password_col = 'password'
+                nickname_col = 'nickname' if 'nickname' in df.columns else None
+            else:
+                username_col = '用户名'
+                password_col = '密码'
+                nickname_col = '昵称' if '昵称' in df.columns else None
+            
+            count = 0
+            for index, row in df.iterrows():
+                username = str(row[username_col]).strip()
+                password = str(row[password_col]).strip()
+                nickname = str(row[nickname_col]).strip() if nickname_col and pd.notna(row[nickname_col]) else ""
+                
+                if username and password:
+                    account = Account(username=username, password=password, nickname=nickname)
+                    self.account_manager.add_account(account)
+                    count += 1
+            
+            return count, None
+            
+        except Exception as e:
+            return 0, f"读取Excel文件时出错: {str(e)}"
     
     def export_accounts(self):
         """导出账号到文件"""
@@ -195,6 +292,33 @@ class AccountView(QWidget):
                 username = self.account_table.item(row, 0).text()
                 self.account_manager.remove_account(username)
             self.refresh_table()
+    
+    def set_background(self):
+        if getattr(sys, 'frozen', False):
+            if hasattr(sys, '_MEIPASS'):
+                app_path = sys._MEIPASS
+            else:
+                app_path = os.path.dirname(sys.executable)
+                if not os.path.exists(os.path.join(app_path, 'ZR.ico')):
+                    internal_path = os.path.join(app_path, '_internal')
+                    if os.path.exists(os.path.join(internal_path, 'ZR.ico')):
+                        app_path = internal_path
+        else:
+            app_path = os.path.dirname(os.path.abspath(__file__))
+            app_path = os.path.dirname(app_path)
+        
+        bg_path = os.path.join(app_path, 'ZR.png')
+        if os.path.exists(bg_path):
+            pixmap = QPixmap(bg_path)
+            palette = self.palette()
+            palette.setBrush(self.backgroundRole(), QBrush(pixmap.scaled(
+                self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)))
+            self.setPalette(palette)
+    
+    def resizeEvent(self, event):
+        # 窗口大小改变时重新设置背景
+        self.set_background()
+        super().resizeEvent(event)
     
     def on_row_double_clicked(self, index):
         """双击行打开详情"""

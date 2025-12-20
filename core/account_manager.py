@@ -4,6 +4,8 @@
 """
 import json
 import csv
+import os
+import sys
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
 
@@ -30,6 +32,22 @@ class AccountManager:
     
     def __init__(self):
         self.accounts: List[Account] = []
+        # 使用更可靠的方式确定数据文件路径
+        if getattr(sys, 'frozen', False):
+            # 如果是打包后的可执行程序
+            if hasattr(sys, '_MEIPASS'):
+                # PyInstaller打包
+                app_dir = os.path.dirname(sys.executable)
+            else:
+                # 其他打包方式
+                app_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        else:
+            # 源代码运行
+            app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        self.data_file = os.path.join(app_dir, "accounts.json")
+        print(f"账号数据文件路径: {self.data_file}")  # 添加调试信息
+        self.load_accounts()
     
     def add_account(self, username: str, password: str, nickname: str = "") -> bool:
         """添加账号"""
@@ -38,6 +56,7 @@ class AccountManager:
             return False
         
         self.accounts.append(Account(username, password, nickname))
+        self.save_accounts()
         return True
     
     def remove_account(self, username: str) -> bool:
@@ -45,12 +64,14 @@ class AccountManager:
         for i, acc in enumerate(self.accounts):
             if acc.username == username:
                 self.accounts.pop(i)
+                self.save_accounts()
                 return True
         return False
     
     def clear_accounts(self):
         """清空所有账号"""
         self.accounts.clear()
+        self.save_accounts()
     
     def get_account(self, username: str) -> Optional[Account]:
         """获取账号"""
@@ -69,6 +90,48 @@ class AccountManager:
         if acc:
             acc.status = status
             acc.progress = progress
+            self.save_accounts()
+    
+    def save_accounts(self):
+        """保存账号信息到文件"""
+        try:
+            # 确保目录存在
+            dir_path = os.path.dirname(self.data_file)
+            if dir_path and not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+            
+            with open(self.data_file, 'w', encoding='utf-8') as f:
+                data = {
+                    'accounts': [acc.to_dict() for acc in self.accounts]
+                }
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            print(f"成功保存 {len(self.accounts)} 个账号到: {self.data_file}")
+            return True
+        except Exception as e:
+            print(f"保存账号信息失败: {e}")
+            print(f"尝试保存到: {self.data_file}")
+            return False
+    
+    def load_accounts(self):
+        """从文件加载账号信息"""
+        if not os.path.exists(self.data_file):
+            print(f"账号数据文件不存在: {self.data_file}")
+            return
+        
+        try:
+            with open(self.data_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if 'accounts' in data:
+                    self.accounts = [Account.from_dict(acc) for acc in data['accounts']]
+                    print(f"成功加载 {len(self.accounts)} 个账号")
+                else:
+                    print("账号数据文件格式错误：缺少 'accounts' 字段")
+                    self.accounts = []
+        except Exception as e:
+            print(f"加载账号信息失败: {e}")
+            print(f"尝试加载的文件: {self.data_file}")
+            self.accounts = []
     
     def import_from_file(self, filepath: str) -> tuple[int, str]:
         """

@@ -200,6 +200,7 @@ class TimeStudyThread(QThread):
         
         # 平分到每个课程
         self.per_course_time = total_seconds // course_count if course_count > 0 else total_seconds
+        
         return actual_minutes, self.per_course_time
 
     def study_single_course(self, chapter):
@@ -210,15 +211,38 @@ class TimeStudyThread(QThread):
         course_location = chapter.get("location", "未知课程")
         learning_time = self.per_course_time
         
+        # 将秒转换为更友好的时间格式显示
+        minutes = learning_time // 60
+        seconds = learning_time % 60
+        
+        if minutes >= 60:
+            hours = minutes // 60
+            mins = minutes % 60
+            if mins > 0:
+                if seconds > 0:
+                    time_str = f"{hours}小时{mins}分{seconds}秒"
+                else:
+                    time_str = f"{hours}小时{mins}分钟"
+            else:
+                if seconds > 0:
+                    time_str = f"{hours}小时{seconds}秒"
+                else:
+                    time_str = f"{hours}小时"
+        else:
+            if minutes > 0:
+                time_str = f"{minutes}分{seconds}秒" if seconds > 0 else f"{minutes}分钟"
+            else:
+                time_str = f"{seconds}秒"
+        
         self.progress_update.emit(
-            "start", f"[并发刷时长] {course_location} - {learning_time}秒"
+            "start", f"[并发刷时长] {course_location} - {time_str}"
         )
         
         success = self.client.simulate_time(self.cid, self.uid, chapter["id"], learning_time)
         
         if success:
             self.progress_update.emit(
-                "finish", f"[完成] {course_location} - {learning_time}秒"
+                "finish", f"[完成] {course_location} - {time_str}"
             )
         else:
             self.progress_update.emit("error", f"[失败] {course_location}")
@@ -252,8 +276,30 @@ class TimeStudyThread(QThread):
             # 计算每课程时间
             actual_minutes, per_course_seconds = self.calculate_unit_time(len(visible_chapters))
             
+            # 格式化时间显示
+            if actual_minutes >= 60:
+                hours = actual_minutes // 60
+                mins = actual_minutes % 60
+                if mins > 0:
+                    total_time_str = f"{hours}小时{mins}分钟"
+                else:
+                    total_time_str = f"{hours}小时"
+            else:
+                total_time_str = f"{actual_minutes}分钟"
+            
+            per_course_mins = per_course_seconds // 60
+            if per_course_mins >= 60:
+                hours = per_course_mins // 60
+                mins = per_course_mins % 60
+                if mins > 0:
+                    per_course_str = f"{hours}小时{mins}分钟"
+                else:
+                    per_course_str = f"{hours}小时"
+            else:
+                per_course_str = f"{per_course_mins}分钟"
+            
             self.progress_update.emit(
-                "info", f"发现 {len(visible_chapters)} 个课程，单元总时长 {actual_minutes} 分钟，每课程 {per_course_seconds} 秒，{self.max_concurrent} 并发"
+                "info", f"发现 {len(visible_chapters)} 个课程，每课程时长 {total_time_str}，{self.max_concurrent} 并发"
             )
 
             # 使用线程池并发刷
@@ -317,7 +363,7 @@ class TimeStudyThread(QThread):
             actual_minutes, per_course_seconds = self.calculate_unit_time(len(all_chapters))
             self.progress_update.emit(
                 "info", 
-                f"总共 {len(all_chapters)} 个课程，总时长 {actual_minutes} 分钟，每课程 {per_course_seconds} 秒"
+                f"总共 {len(all_chapters)} 个课程，每课程时长 {actual_minutes} 分钟"
             )
             self.progress_update.emit(
                 "info", 

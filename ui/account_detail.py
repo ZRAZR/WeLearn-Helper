@@ -2,12 +2,15 @@
 账号详情对话框
 用于单个账号的精细化管理：手动选课、单独执行、查看日志
 """
+import os
+import sys
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
     QListWidget, QListWidgetItem, QLabel, QTextEdit, QMessageBox,
     QComboBox, QSpinBox, QSplitter, QWidget, QProgressBar
 )
+from PyQt5.QtGui import QPixmap, QPainter, QBrush, QColor
 from core.api import WeLearnClient
 from core.account_manager import Account
 from ui.workers import LoginThread, CourseThread, UnitsThread, TimeStudyThread, StudyThread
@@ -44,6 +47,9 @@ class AccountDetailDialog(QDialog):
         self.init_ui()
         self.setWindowTitle(f"账号管理 - {account.nickname or account.username}")
         self.setMinimumSize(700, 500)
+        # 移除右上角的问号帮助按钮
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.set_background()
     
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -152,11 +158,18 @@ class AccountDetailDialog(QDialog):
         time_row1 = QHBoxLayout()
         time_row1.addWidget(QLabel("单元时长:"))
         self.time_spin = QSpinBox()
-        self.time_spin.setRange(1, 300)
-        self.time_spin.setValue(60)
-        self.time_spin.setSuffix(" 分钟")
+        self.time_spin.setRange(1, 240)  # 最大240小时
+        self.time_spin.setValue(3)  # 默认3小时
         self.time_spin.setToolTip("每个单元的总学习时长")
         time_row1.addWidget(self.time_spin)
+        
+        # 添加时间单位选择
+        self.time_unit_combo = QComboBox()
+        self.time_unit_combo.addItems(["小时", "分钟"])
+        self.time_unit_combo.setCurrentText("小时")  # 默认选择小时
+        self.time_unit_combo.currentTextChanged.connect(self.on_time_unit_changed)
+        time_row1.addWidget(self.time_unit_combo)
+        
         time_row1.addWidget(QLabel("  随机扰动:"))
         self.time_random_spin = QSpinBox()
         self.time_random_spin.setRange(0, 30)
@@ -172,7 +185,7 @@ class AccountDetailDialog(QDialog):
         time_row2.addWidget(QLabel("并发数:"))
         self.concurrent_spin = QSpinBox()
         self.concurrent_spin.setRange(1, 100)
-        self.concurrent_spin.setValue(10)
+        self.concurrent_spin.setValue(90)
         self.concurrent_spin.setToolTip("同时刷多少个课程，越高刷得越快")
         time_row2.addWidget(self.concurrent_spin)
         time_row2.addStretch()
@@ -212,7 +225,17 @@ class AccountDetailDialog(QDialog):
         
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
+        self.log_text.setStyleSheet("""
+            QTextEdit {
+                background-color: rgba(255, 255, 255, 180);
+                border: 1px solid rgba(200, 200, 200, 200);
+                border-radius: 5px;
+                padding: 5px;
+                color: #333333;
+                font-family: Consolas, monospace;
+                font-size: 12px;
+            }
+        """)
         log_layout.addWidget(self.log_text)
         
         clear_log_btn = QPushButton("清空日志")
@@ -362,6 +385,21 @@ class AccountDetailDialog(QDialog):
             self.time_widget.show()
             self.start_btn.setText("▶️ 开始刷时长")
     
+    def on_time_unit_changed(self, unit: str):
+        """时间单位切换"""
+        current_value = self.time_spin.value()
+        
+        if unit == "小时":
+            # 从分钟转换为小时
+            self.time_spin.setRange(1, 240)  # 最大240小时
+            self.time_spin.setValue(max(1, current_value // 60))  # 转换为小时，确保至少1小时
+            self.time_random_spin.setSuffix(" 分钟")  # 随机扰动始终以分钟为单位
+        else:
+            # 从小时转换为分钟
+            self.time_spin.setRange(1, 14400)  # 最大14400分钟
+            self.time_spin.setValue(max(1, current_value * 60))  # 转换为分钟，确保至少1分钟
+            self.time_random_spin.setSuffix(" 分钟")  # 随机扰动始终以分钟为单位
+    
     def start_study(self):
         """开始任务"""
         if not self.current_course:
@@ -401,10 +439,25 @@ class AccountDetailDialog(QDialog):
                 self.current_units
             )
         else:
-            total_minutes = self.time_spin.value()
+            # 获取时间值和单位
+            time_value = self.time_spin.value()
+            time_unit = self.time_unit_combo.currentText()
+            
+            # 转换为分钟
+            if time_unit == "小时":
+                total_minutes = time_value * 60
+            else:
+                total_minutes = time_value
+                
             random_range = self.time_random_spin.value()
             concurrent = self.concurrent_spin.value()
-            self.log(f"开始刷时长 (已选 {len(units_to_process)} 个单元, 每单元 {total_minutes}±{random_range} 分钟, {concurrent} 并发)...")
+            
+            # 根据选择的时间单位显示日志
+            if time_unit == "小时":
+                self.log(f"开始刷时长 (已选 {len(units_to_process)} 个单元, 每单元 {time_value}±{random_range//60} 小时, {concurrent} 并发)...")
+            else:
+                self.log(f"开始刷时长 (已选 {len(units_to_process)} 个单元, 每单元 {time_value}±{random_range} 分钟, {concurrent} 并发)...")
+                
             self.update_status("运行中")
             
             self.study_thread = TimeStudyThread(
@@ -472,3 +525,38 @@ class AccountDetailDialog(QDialog):
                     self.study_thread.terminate()
                     self.study_thread.wait(1000)
         event.accept()
+    
+    def set_background(self):
+        # 获取应用程序路径
+        if getattr(sys, 'frozen', False):
+            # 如果是打包后的应用程序
+            if hasattr(sys, '_MEIPASS'):
+                # 单文件版本，资源文件在临时目录中
+                app_path = sys._MEIPASS
+            else:
+                # 目录版本
+                app_path = os.path.dirname(sys.executable)
+                # 检查资源文件是否在根目录
+                if not os.path.exists(os.path.join(app_path, 'ZR.ico')):
+                    # 如果不在根目录，尝试在_internal目录中查找
+                    internal_path = os.path.join(app_path, '_internal')
+                    if os.path.exists(os.path.join(internal_path, 'ZR.ico')):
+                        app_path = internal_path
+        else:
+            # 如果是开发环境
+            app_path = os.path.dirname(os.path.abspath(__file__))
+            app_path = os.path.dirname(app_path)  # 回到项目根目录
+        
+        # 设置背景图片
+        bg_path = os.path.join(app_path, 'ZR.png')
+        if os.path.exists(bg_path):
+            pixmap = QPixmap(bg_path)
+            palette = self.palette()
+            palette.setBrush(self.backgroundRole(), QBrush(pixmap.scaled(
+                self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)))
+            self.setPalette(palette)
+    
+    def resizeEvent(self, event):
+        # 窗口大小改变时重新设置背景
+        self.set_background()
+        super().resizeEvent(event)
