@@ -4,6 +4,7 @@
 """
 import os
 import sys
+import time
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
@@ -14,6 +15,7 @@ from PyQt5.QtGui import QPixmap, QPainter, QBrush, QColor
 from PyQt5.QtMultimedia import QSound
 from core.api import WeLearnClient
 from core.account_manager import Account
+from core.task_progress import TaskProgress
 
 
 # 直接导入workers模块，避免使用ui.workers
@@ -25,8 +27,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-# 直接导入workers模块
-import workers
+# 使用绝对导入
+from ui import workers
 LoginThread = workers.LoginThread
 CourseThread = workers.CourseThread
 UnitsThread = workers.UnitsThread
@@ -43,10 +45,14 @@ class AccountDetailDialog(QDialog):
     # 信号：状态更新（用于通知主界面刷新）
     status_updated = pyqtSignal(str, str, str)  # username, status, progress
     
-    def __init__(self, account: Account, parent=None):
+    def __init__(self, account: Account, parent=None, resume_task_data=None):
         super().__init__(parent)
         self.account = account
         self.client = WeLearnClient()  # 每个账号独立的会话
+        self.progress_manager = TaskProgress()  # 任务进度管理器
+        self.resume_task_data = resume_task_data  # 恢复任务的数据
+        self.need_resume_task = False  # 是否需要恢复任务
+        self.auto_login_attempted = False  # 标记是否已尝试自动登录
         
         # 状态数据
         self.is_logged_in = False
@@ -62,8 +68,6 @@ class AccountDetailDialog(QDialog):
         self.units_thread = None
         self.study_thread = None  # 刷作业/刷时长通用
         
-
-        
         self.init_ui()
         self.setWindowTitle(f"账号管理 - {account.nickname or account.username}")
         self.setMinimumSize(700, 500)
@@ -73,14 +77,26 @@ class AccountDetailDialog(QDialog):
     
     def showEvent(self, event):
         """对话框显示时自动登录"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+        
         super().showEvent(event)
+        logger.info(f"账号详情对话框显示事件 - 账号: {self.account.username}")
         
         # 如果还没有尝试过自动登录，则自动登录
         if not self.auto_login_attempted and not self.is_logged_in:
             self.auto_login_attempted = True
+            logger.info(f"准备自动登录 - 账号: {self.account.username}")
+            
             # 延迟一点时间再执行登录，确保界面完全显示
             from PyQt5.QtCore import QTimer
             QTimer.singleShot(500, self.do_login)
+            
+            # 如果有恢复任务的数据，将在登录成功后自动恢复任务
+            if self.resume_task_data:
+                logger.info(f"检测到恢复任务数据，将在登录成功后恢复任务 - 账号: {self.account.username}")
+        else:
+            logger.info(f"已登录或已尝试登录，跳过自动登录 - 账号: {self.account.username}, 已登录: {self.is_logged_in}, 已尝试: {self.auto_login_attempted}")
     
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -98,9 +114,6 @@ class AccountDetailDialog(QDialog):
         info_layout.addWidget(self.login_btn)
         
         layout.addLayout(info_layout)
-        
-        # 标记是否已自动登录
-        self.auto_login_attempted = False
         
         # ========== 分割器：左侧课程选择 + 右侧日志 ==========
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -352,6 +365,16 @@ class AccountDetailDialog(QDialog):
             self.update_status("已登录")
             # 自动刷新课程
             self.refresh_courses()
+            
+            # 如果有恢复任务的数据，登录成功后立即恢复任务
+            if self.resume_task_data:
+                logger.info(f"检测到恢复任务数据，将在课程刷新后恢复任务 - 账号: {self.account.username}")
+                # 标记需要恢复任务，在课程和单元加载完成后自动恢复
+                self.need_resume_task = True
+                
+                # 使用定时器确保对话框在前台
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1000, self._ensure_foreground_and_resume)
         else:
             self.login_btn.setText("🔐 登录")
             self.log(f"❌ 登录失败: {message}")
@@ -361,6 +384,19 @@ class AccountDetailDialog(QDialog):
             # 移除问号帮助按钮
             msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
             msg_box.exec_()
+    
+    def _ensure_foreground_and_resume(self):
+        """确保对话框在前台并准备恢复任务"""
+        try:
+            self.raise_()
+            self.activateWindow()
+            from core.logger import get_logger
+            logger = get_logger("AccountDetail")
+            logger.info(f"已确保账号详情对话框在前台显示 - 账号: {self.account.username}")
+        except Exception as e:
+            from core.logger import get_logger
+            logger = get_logger("AccountDetail")
+            logger.error(f"确保对话框在前台显示时出错: {str(e)}")
     
     def refresh_courses(self):
         """刷新课程列表"""
@@ -461,6 +497,13 @@ class AccountDetailDialog(QDialog):
             self.start_btn.setEnabled(True)
             self.log(f"✅ 获取到 {len(self.current_units)} 个单元")
             logger.info(f"单元列表获取成功 - 账号: {self.account.username}, 课程: {self.current_course['name']}, 单元数量: {len(self.current_units)}, 单元: {', '.join(unit_names)}")
+            
+            # 如果需要恢复任务，现在开始恢复
+            if self.need_resume_task and self.resume_task_data:
+                logger.info(f"课程和单元数据已加载完成，开始恢复任务")
+                # 使用单次定时器确保UI更新完成后再恢复任务
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(500, self.resume_task)
         else:
             self.log(f"❌ 获取单元失败: {message}")
             logger.error(f"单元列表获取失败 - 账号: {self.account.username}, 课程: {self.current_course['name']}, 错误: {message}")
@@ -600,6 +643,21 @@ class AccountDetailDialog(QDialog):
             self.update_status("运行中")
             
             logger.info(f"创建刷作业线程 - 课程ID: {self.current_course['cid']}, 用户ID: {self.uid}, 班级ID: {self.classid}")
+            # 生成任务ID
+            task_id = f"刷作业_{self.current_course['cid']}_{self.uid}_{int(time.time())}"
+            
+            # 如果是从恢复任务开始的，立即删除旧的进度
+            if self.resume_task_data:
+                old_task_id = self.resume_task_data.get('task_id')
+                if old_task_id:
+                    success = self.progress_manager.clear_task_progress(old_task_id)
+                    if success:
+                        self.log(f"✅ 已删除旧的进度: {old_task_id}")
+                        logger.info(f"已删除旧的进度: {old_task_id}")
+                    else:
+                        self.log(f"⚠️ 删除旧进度失败: {old_task_id}")
+                        logger.error(f"删除旧进度失败: {old_task_id}")
+            
             self.study_thread = StudyThread(
                 self.client,
                 self.current_course['cid'],
@@ -608,7 +666,9 @@ class AccountDetailDialog(QDialog):
                 units_to_process,  # 传入单元列表
                 accuracy_config,
                 self.current_units,
-                max_concurrent=homework_concurrent  # 传入并发数
+                max_concurrent=homework_concurrent,  # 传入并发数
+                username=self.account.username,  # 添加用户名
+                task_id=task_id  # 添加任务ID
             )
         else:
             # 获取时间值和单位（这些变量在提醒弹窗中已经获取过）
@@ -635,6 +695,21 @@ class AccountDetailDialog(QDialog):
             self.update_status("运行中")
             
             logger.info(f"创建刷时长线程 - 课程ID: {self.current_course['cid']}, 用户ID: {self.uid}, 班级ID: {self.classid}")
+            # 生成任务ID
+            task_id = f"刷时长_{self.current_course['cid']}_{self.uid}_{int(time.time())}"
+            
+            # 如果是从恢复任务开始的，立即删除旧的进度
+            if self.resume_task_data:
+                old_task_id = self.resume_task_data.get('task_id')
+                if old_task_id:
+                    success = self.progress_manager.clear_task_progress(old_task_id)
+                    if success:
+                        self.log(f"✅ 已删除旧的进度: {old_task_id}")
+                        logger.info(f"已删除旧的进度: {old_task_id}")
+                    else:
+                        self.log(f"⚠️ 删除旧进度失败: {old_task_id}")
+                        logger.error(f"删除旧进度失败: {old_task_id}")
+            
             self.study_thread = TimeStudyThread(
                 self.client,
                 self.current_course['cid'],
@@ -644,7 +719,9 @@ class AccountDetailDialog(QDialog):
                 total_minutes,     # 每单元总分钟数
                 random_range,      # 随机扰动分钟数
                 self.current_units,
-                max_concurrent=concurrent
+                max_concurrent=concurrent,
+                username=self.account.username,  # 添加用户名
+                task_id=task_id  # 添加任务ID
             )
         
         logger.info("任务线程创建完成，连接信号并启动")
@@ -725,8 +802,6 @@ class AccountDetailDialog(QDialog):
             total_units = len(self.current_units) if self.current_units else 0
             self.log(f"✅ 刷时长完成！已完成 {completed_units}/{total_units} 个单元")
             logger.info(f"刷时长任务完成 - 账号: {self.account.username}, 课程: {self.current_course['name']}, 完成单元: {completed_units}/{total_units}")
-            
-
         
         # 播放提示音
         try:
@@ -759,12 +834,31 @@ class AccountDetailDialog(QDialog):
         import time
         import os
         
+        logger = get_logger("AccountDetail")
+        
+        # 检查是否有任务正在运行
+        if self.study_thread and self.study_thread.isRunning():
+            # 显示确认对话框
+            reply = QMessageBox.question(
+                self,
+                "确认关闭",
+                "当前有任务正在进行中，关闭此页面将终止任务。\n\n是否确认继续关闭？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.No:
+                # 用户选择不关闭，忽略关闭事件
+                event.ignore()
+                return
+            
+            # 用户确认关闭，记录日志
+            logger.info(f"用户确认关闭，将终止正在进行的任务 - 账号: {self.account.username}")
+        
         try:
             import psutil
         except ImportError:
             psutil = None
-        
-        logger = get_logger("AccountDetail")
         
         logger.info(f"账号详情窗口关闭 - 账号: {self.account.username}")
         logger.info(f"当前进程ID: {os.getpid()}")
@@ -874,10 +968,10 @@ class AccountDetailDialog(QDialog):
                 # 目录版本
                 app_path = os.path.dirname(sys.executable)
                 # 检查资源文件是否在根目录
-                if not os.path.exists(os.path.join(app_path, 'ZR.ico')):
+                if not os.path.exists(os.path.join(app_path, 'ZR.png')):
                     # 如果不在根目录，尝试在_internal目录中查找
                     internal_path = os.path.join(app_path, '_internal')
-                    if os.path.exists(os.path.join(internal_path, 'ZR.ico')):
+                    if os.path.exists(os.path.join(internal_path, 'ZR.png')):
                         app_path = internal_path
         else:
             # 如果是开发环境
@@ -886,14 +980,412 @@ class AccountDetailDialog(QDialog):
         
         # 设置背景图片
         bg_path = os.path.join(app_path, 'ZR.png')
+        print(f"背景图片路径: {bg_path}")
+        print(f"背景图片是否存在: {os.path.exists(bg_path)}")
+        
         if os.path.exists(bg_path):
-            pixmap = QPixmap(bg_path)
-            palette = self.palette()
-            palette.setBrush(self.backgroundRole(), QBrush(pixmap.scaled(
-                self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)))
-            self.setPalette(palette)
+            try:
+                pixmap = QPixmap(bg_path)
+                if not pixmap.isNull():
+                    palette = self.palette()
+                    palette.setBrush(self.backgroundRole(), QBrush(pixmap.scaled(
+                        self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)))
+                    self.setPalette(palette)
+                    print("背景图片设置成功")
+                else:
+                    print("背景图片加载失败，图片可能损坏")
+            except Exception as e:
+                print(f"设置背景图片时发生错误: {str(e)}")
+        else:
+            print("背景图片文件不存在，跳过背景设置")
     
     def resizeEvent(self, event):
         # 窗口大小改变时重新设置背景
         self.set_background()
         super().resizeEvent(event)
+    
+    def resume_task(self):
+        """恢复任务"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+        
+        try:
+            if not self.resume_task_data:
+                logger.warning("没有恢复任务数据")
+                return
+            
+            if not self.is_logged_in:
+                logger.warning("账号未登录，无法恢复任务")
+                # 延迟1秒后再次尝试
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1000, self.resume_task)
+                return
+            
+            # 检查课程数据是否已加载
+            if not self.courses:
+                logger.warning("课程数据未加载，无法恢复任务")
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1000, self.resume_task)
+                return
+            
+            # 检查UI是否已完全加载课程列表
+            if self.courses_list.count() == 0:
+                logger.warning("课程列表UI未加载，无法恢复任务")
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1000, self.resume_task)
+                return
+            
+            logger.info(f"开始恢复任务 - 账号: {self.account.username}, 任务ID: {self.resume_task_data.get('task_id')}")
+            self.log(f"正在恢复任务: {self.resume_task_data.get('task_type', '未知任务')}")
+            
+            # 确保对话框在前台
+            self.raise_()
+            self.activateWindow()
+            
+            # 获取任务数据
+            task_type = self.resume_task_data.get('task_type')
+            cid = self.resume_task_data.get('cid')
+            uid = self.resume_task_data.get('uid')
+            classid = self.resume_task_data.get('classid')
+            unit_indices = self.resume_task_data.get('unit_indices', [])
+            current_units = self.resume_task_data.get('current_units', [])
+            completed_units = self.resume_task_data.get('completed_units', [])
+            task_config = self.resume_task_data.get('task_config', {})
+            
+            # 查找对应的课程
+            target_course = None
+            for course in self.courses:
+                if course['cid'] == cid:
+                    target_course = course
+                    break
+            
+            if not target_course:
+                logger.error(f"未找到课程ID为 {cid} 的课程")
+                self.log(f"错误: 未找到对应的课程，无法恢复任务")
+                msg_box = QMessageBox(QMessageBox.Warning, "错误", "未找到对应的课程，无法恢复任务")
+                # 移除问号帮助按钮
+                msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+                msg_box.exec_()
+                return
+            
+            # 设置当前课程
+            self.current_course = target_course
+            self.uid = uid
+            self.classid = classid
+            
+            # 更新UI显示
+            self.current_course_label.setText(target_course['name'])
+            
+            # 选中对应的课程项
+            for i in range(self.courses_list.count()):
+                item = self.courses_list.item(i)
+                course = item.data(Qt.ItemDataRole.UserRole)
+                if course and course['cid'] == cid:
+                    self.courses_list.setCurrentItem(item)
+                    break
+            
+            # 如果单元数据还没有加载，先加载单元数据
+            if not self.current_units or len(self.current_units) != len(current_units):
+                # 设置单元数据
+                self.current_units = current_units
+                self.uid = uid
+                self.classid = classid
+                
+                # 填充单元列表
+                self.fill_unit_list_with_resume_data(unit_indices, completed_units)
+                
+                # 延迟恢复任务，确保UI更新完成
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1000, lambda: self.complete_task_resume(task_type, task_config, unit_indices))
+            else:
+                # 单元数据已加载，直接恢复任务
+                self.fill_unit_list_with_resume_data(unit_indices, completed_units)
+                # 延迟恢复任务，确保UI更新完成
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(500, lambda: self.complete_task_resume(task_type, task_config, unit_indices))
+        except Exception as e:
+            logger.error(f"恢复任务时发生错误: {str(e)}", exc_info=True)
+            self.log(f"❌ 恢复任务失败: {str(e)}")
+    
+    def fill_unit_list_with_resume_data(self, unit_indices, completed_units):
+        """使用恢复数据填充单元列表"""
+        # 填充单元列表
+        self.unit_list.clear()
+        for i, unit in enumerate(self.current_units):
+            unit_name = unit.get('name', f'单元 {i+1}')
+            item = QListWidgetItem(f"单元 {i+1}: {unit_name}")
+            
+            # 如果单元已完成，则不选中
+            if i in completed_units:
+                item.setCheckState(Qt.CheckState.Unchecked)
+                item.setText(f"[已完成] 单元 {i+1}: {unit_name}")
+            else:
+                item.setCheckState(Qt.CheckState.Checked)
+            
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.unit_list.addItem(item)
+    
+    def complete_task_resume(self, task_type, task_config, unit_indices):
+        """完成任务恢复"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+        
+        try:
+            # 确保UI元素已完全加载
+            if not hasattr(self, 'mode_combo') or not self.mode_combo:
+                logger.error("任务模式控件未初始化，无法恢复任务")
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1000, lambda: self.complete_task_resume(task_type, task_config, unit_indices))
+                return
+            
+            # 确保单元列表已加载
+            if not hasattr(self, 'unit_list') or self.unit_list.count() == 0:
+                logger.error("单元列表未加载，无法恢复任务")
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1000, lambda: self.complete_task_resume(task_type, task_config, unit_indices))
+                return
+            
+            # 设置任务模式
+            if task_type == "刷作业":
+                self.mode_combo.setCurrentText("刷作业")
+                # 设置任务配置
+                if 'accuracy_config' in task_config:
+                    self.accuracy_spin.setValue(task_config['accuracy_config'])
+                if 'max_concurrent' in task_config:
+                    self.homework_concurrent_spin.setValue(task_config['max_concurrent'])
+            else:
+                self.mode_combo.setCurrentText("刷时长")
+                # 设置任务配置
+                if 'total_minutes' in task_config:
+                    time_value = task_config['total_minutes']
+                    if time_value >= 60:
+                        self.time_unit_combo.setCurrentText("小时")
+                        self.time_spin.setValue(time_value // 60)
+                    else:
+                        self.time_unit_combo.setCurrentText("分钟")
+                        self.time_spin.setValue(time_value)
+                if 'random_range' in task_config:
+                    self.time_random_spin.setValue(task_config['random_range'])
+                if 'max_concurrent' in task_config:
+                    self.concurrent_spin.setValue(task_config['max_concurrent'])
+            
+            # 生成任务ID
+            task_id = self.progress_manager.generate_task_id(self.current_course['cid'], self.uid, task_type)
+            
+            # 立即开始任务，不延迟
+            # 如果是从恢复任务开始的，立即删除旧的进度
+            if self.resume_task_data:
+                old_task_id = self.resume_task_data.get('task_id')
+                if old_task_id:
+                    success = self.progress_manager.clear_task_progress(old_task_id)
+                    if success:
+                        self.log(f"✅ 已删除旧的进度: {old_task_id}")
+                        logger.info(f"已删除旧的进度: {old_task_id}")
+                    else:
+                        self.log(f"⚠️ 删除旧进度失败: {old_task_id}")
+                        logger.error(f"删除旧进度失败: {old_task_id}")
+            
+            self.start_resumed_task(task_id)
+            
+            # 确保窗口被激活和置顶
+            self.raise_()
+            self.activateWindow()
+            
+            # 使用定时器再次确保窗口在前台
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(500, self._ensure_foreground_after_resume)
+            
+            logger.info(f"任务恢复准备完成 - 课程: {self.current_course['name']}, 任务类型: {task_type}")
+            self.log(f"任务恢复准备完成，正在开始执行...")
+        except Exception as e:
+            logger.error(f"完成任务恢复时发生错误: {str(e)}", exc_info=True)
+            self.log(f"❌ 任务恢复失败: {str(e)}")
+    
+    def _ensure_foreground_after_resume(self):
+        """确保任务恢复后对话框在前台"""
+        try:
+            self.raise_()
+            self.activateWindow()
+            from core.logger import get_logger
+            logger = get_logger("AccountDetail")
+            logger.info(f"已确保任务恢复后对话框在前台显示 - 账号: {self.account.username}")
+        except Exception as e:
+            from core.logger import get_logger
+            logger = get_logger("AccountDetail")
+            logger.error(f"确保任务恢复后对话框在前台显示时出错: {str(e)}")
+    
+    def start_resumed_task(self, task_id):
+        """开始恢复的任务"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+        
+        try:
+            # 确保所有必要的数据已加载
+            if not self.current_course:
+                logger.error("没有选择课程，无法开始任务")
+                return
+            
+            # 确保单元列表已加载
+            if not hasattr(self, 'unit_list') or self.unit_list.count() == 0:
+                logger.error("单元列表未加载，无法开始任务")
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1000, lambda: self.start_resumed_task(task_id))
+                return
+            
+            # 获取选中的单元
+            units_to_process = []
+            for i in range(self.unit_list.count()):
+                item = self.unit_list.item(i)
+                if item.checkState() == Qt.CheckState.Checked:
+                    unit_index = item.data(Qt.ItemDataRole.UserRole)
+                    units_to_process.append(unit_index)
+            
+            if not units_to_process:
+                logger.warning("没有选中的单元，无法开始任务")
+                return
+            
+            # 确保UI控件已初始化
+            if not hasattr(self, 'mode_combo') or not self.mode_combo:
+                logger.error("任务模式控件未初始化，无法开始任务")
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(1000, lambda: self.start_resumed_task(task_id))
+                return
+            
+            mode = self.mode_combo.currentText()
+            
+            self.start_btn.setEnabled(False)
+            self.stop_btn.setEnabled(True)
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 0)  # 不确定进度
+            
+            if mode == "刷作业":
+                accuracy_config = self.accuracy_spin.value()
+                homework_concurrent = self.homework_concurrent_spin.value()
+                
+                self.log(f"恢复刷作业任务 (已选 {len(units_to_process)} 个单元, {homework_concurrent} 并发)...")
+                self.update_status("运行中")
+                
+                self.study_thread = StudyThread(
+                    self.client,
+                    self.current_course['cid'],
+                    self.uid,
+                    self.classid,
+                    units_to_process,
+                    accuracy_config,
+                    self.current_units,
+                    max_concurrent=homework_concurrent,
+                    username=self.account.username,
+                    task_id=task_id
+                )
+                
+                # 连接信号
+                self.study_thread.progress_updated.connect(self.update_progress)
+                self.study_thread.status_updated.connect(self.update_status)
+                self.study_thread.log_message.connect(self.log)
+                self.study_thread.finished.connect(self.on_study_finished)
+                self.study_thread.error_occurred.connect(self.on_study_error)
+                
+                # 保存任务进度
+                self.save_task_progress(task_id, "刷作业", units_to_process, {
+                    'accuracy_config': accuracy_config,
+                    'max_concurrent': homework_concurrent
+                })
+                
+                # 启动线程
+                self.study_thread.start()
+                logger.info(f"刷作业线程已启动 - 任务ID: {task_id}")
+            else:
+                # 获取时间值和单位
+                time_value = self.time_spin.value()
+                time_unit = self.time_unit_combo.currentText()
+                
+                # 转换为分钟
+                if time_unit == "小时":
+                    total_minutes = time_value * 60
+                else:
+                    total_minutes = time_value
+                    
+                random_range = self.time_random_spin.value()
+                concurrent = self.concurrent_spin.value()
+                
+                self.log(f"恢复刷时长任务 (已选 {len(units_to_process)} 个单元, 每单元 {time_value} {time_unit}, {concurrent} 并发)...")
+                self.update_status("运行中")
+                
+                self.study_thread = TimeStudyThread(
+                    self.client,
+                    self.current_course['cid'],
+                    self.uid,
+                    self.classid,
+                    units_to_process,
+                    total_minutes,
+                    random_range,
+                    self.current_units,
+                    max_concurrent=concurrent,
+                    username=self.account.username,
+                    task_id=task_id
+                )
+                
+                # 连接信号
+                self.study_thread.progress_updated.connect(self.update_progress)
+                self.study_thread.status_updated.connect(self.update_status)
+                self.study_thread.log_message.connect(self.log)
+                self.study_thread.finished.connect(self.on_study_finished)
+                self.study_thread.error_occurred.connect(self.on_study_error)
+                
+                # 保存任务进度
+                self.save_task_progress(task_id, "刷时长", units_to_process, {
+                    'total_minutes': total_minutes,
+                    'random_range': random_range,
+                    'max_concurrent': concurrent
+                })
+                
+                # 启动线程
+                self.study_thread.start()
+                logger.info(f"刷时长线程已启动 - 任务ID: {task_id}")
+            
+            logger.info(f"恢复任务已开始 - 账号: {self.account.username}, 课程: {self.current_course['name']}, 任务类型: {mode}")
+        except Exception as e:
+            logger.error(f"开始恢复任务时发生错误: {str(e)}", exc_info=True)
+            self.log(f"❌ 开始恢复任务失败: {str(e)}")
+            # 重置按钮状态
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.progress_bar.setVisible(False)
+        self.log(f"任务已恢复并开始执行")
+    
+    def save_task_progress(self, task_id, task_type, unit_indices, task_config):
+        """保存任务进度
+        
+        Args:
+            task_id: 任务ID
+            task_type: 任务类型（刷作业/刷时长）
+            unit_indices: 选中单元的索引列表
+            task_config: 任务配置字典
+        """
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+        
+        # 获取当前时间
+        import time
+        current_time = time.time()
+        
+        # 保存任务进度
+        success = self.progress_manager.save_task_progress(
+            task_id=task_id,
+            task_type=task_type,
+            cid=self.current_course['cid'],
+            uid=self.uid,
+            classid=self.classid,
+            unit_indices=unit_indices,
+            current_units=self.current_units,
+            completed_units=[],  # 初始时没有完成的单元
+            completed_courses={0: []},  # 初始时没有完成的课程
+            task_config=task_config
+        )
+        
+        if success:
+            logger.info(f"任务进度已保存 - 任务ID: {task_id}, 类型: {task_type}")
+        else:
+            logger.error(f"任务进度保存失败 - 任务ID: {task_id}")
+        
+        return success

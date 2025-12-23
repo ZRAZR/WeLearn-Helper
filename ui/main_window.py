@@ -24,12 +24,12 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 # 直接导入模块
-import account_view
-import account_detail
-import core.account_manager
+from ui import account_view
+from ui import account_detail
+from core import account_manager
 AccountView = account_view.AccountView
 AccountDetailDialog = account_detail.AccountDetailDialog
-Account = core.account_manager.Account
+Account = account_manager.Account
 
 
 class WeLearnUI(QMainWindow):
@@ -43,7 +43,7 @@ class WeLearnUI(QMainWindow):
         self.detail_dialogs = {}  # 存储打开的详情对话框
         self.tray_icon = None     # 系统托盘图标
         self.tray_reminder_timer = None  # 托盘提醒定时器
-        self.version = "V4.6.6"     # 软件版本号
+        self.version = "V5.0.8"     # 软件版本号
         self.init_ui()
         self.init_tray()  # 初始化系统托盘
         
@@ -61,11 +61,18 @@ class WeLearnUI(QMainWindow):
     
     def show(self):
         """重写show方法，在显示窗口后居中"""
+        from core.logger import get_logger
+        logger = get_logger("MainWindow")
+        logger.info("主窗口show方法被调用")
+        
         super().show()
         QTimer.singleShot(100, self.center_window)
+        # 窗口显示后立即检查未完成的任务
+        logger.info("准备在100ms后检查未完成的任务")
+        QTimer.singleShot(100, self.check_incomplete_tasks)
     
     def init_ui(self):
-        self.setWindowTitle("ZR | WeLearn学习助手 V4.6.5    致力于把大学生的时间还给大学生")
+        self.setWindowTitle("ZR | WeLearn学习助手 V5.0.8    致力于把大学生的时间还给大学生")
         self.setGeometry(100, 100, 900, 600)
         self.setMinimumSize(800, 500)
         
@@ -247,6 +254,385 @@ class WeLearnUI(QMainWindow):
         import webbrowser
         webbrowser.open("https://github.com/jhl337/Auto_WeLearn/")
     
+    def check_incomplete_tasks(self):
+        """检查未完成的任务"""
+        from core.task_progress import TaskProgress
+        from core.logger import get_logger
+        
+        logger = get_logger("MainWindow")
+        logger.info("开始检查未完成的任务")
+        
+        # 创建任务进度管理器
+        progress_manager = TaskProgress()
+        
+        # 获取所有未完成的任务
+        incomplete_tasks = progress_manager.get_incomplete_tasks()
+        
+        if incomplete_tasks:
+            logger.info(f"发现 {len(incomplete_tasks)} 个未完成的任务")
+            print(f"发现 {len(incomplete_tasks)} 个未完成的任务，准备显示恢复对话框")
+            # 立即显示对话框，与主UI同时显示
+            self.show_task_resume_dialog(incomplete_tasks)
+        else:
+            logger.info("没有发现未完成的任务")
+            print("没有发现未完成的任务")
+    
+    def show_task_resume_dialog(self, incomplete_tasks):
+        """显示任务恢复对话框"""
+        from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QLabel, QPushButton, 
+                                     QStyle, QListWidget, QListWidgetItem, 
+                                     QCheckBox, QHBoxLayout, QWidget)
+        from PyQt5.QtCore import Qt
+        
+        # 创建自定义对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle("未完成任务")
+        dialog.setMinimumSize(700, 450)
+        dialog.resize(700, 450)
+        # 移除问号帮助按钮
+        dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        
+        # 创建主布局
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        # 添加提示文本
+        message = QLabel(f"发现 {len(incomplete_tasks)} 个未完成的任务，请勾选要继续的任务：")
+        message.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(message)
+        
+        # 添加任务列表
+        task_list = QListWidget()
+        task_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #eee;
+                min-height: 40px;
+            }
+            QListWidget::item:selected {
+                background-color: #e3f2fd;
+            }
+        """)
+        
+        # 添加任务项到列表
+        for i, task in enumerate(incomplete_tasks):
+            task_type = task.get('task_type', '未知任务')
+            task_id = task.get('task_id', 'N/A')
+            last_update = task.get('last_update_time_str', '未知时间')
+            
+            # 从任务ID中提取用户名
+            parts = task_id.split('_')
+            username = parts[0] if len(parts) >= 4 else '未知用户'
+            
+            # 创建自定义列表项，包含勾选框
+            item_widget = QWidget()
+            item_layout = QHBoxLayout(item_widget)
+            item_layout.setContentsMargins(5, 5, 5, 5)
+            
+            # 添加勾选框
+            checkbox = QCheckBox()
+            checkbox.setChecked(False)  # 默认不勾选
+            checkbox.setProperty("task_index", i)  # 存储任务索引
+            
+            # 添加任务信息标签
+            item_text = f"{task_type} - {username} (最后更新: {last_update})"
+            label = QLabel(item_text)
+            label.setWordWrap(True)  # 允许文本换行
+            label.setStyleSheet("font-size: 12px;")
+            
+            item_layout.addWidget(checkbox)
+            item_layout.addWidget(label, 1)  # 1表示拉伸因子
+            
+            # 创建列表项并设置自定义控件
+            item = QListWidgetItem(task_list)
+            item.setSizeHint(item_widget.sizeHint())
+            task_list.setItemWidget(item, item_widget)
+            item.setData(Qt.UserRole, i)  # 存储任务在列表中的索引
+        
+        layout.addWidget(task_list)
+        
+        # 添加按钮
+        button_layout = QVBoxLayout()
+        button_layout.setSpacing(10)
+        
+        continue_button = QPushButton("继续勾选的任务")
+        continue_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                padding: 10px;
+                font-size: 14px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        continue_button.clicked.connect(lambda: self.resume_selected_task(task_list, incomplete_tasks, dialog))
+        button_layout.addWidget(continue_button)
+        
+        delete_button = QPushButton("删除所有任务")
+        delete_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                border: none;
+                padding: 10px;
+                font-size: 14px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        delete_button.clicked.connect(lambda: self.delete_task_progress(incomplete_tasks, dialog))
+        button_layout.addWidget(delete_button)
+        
+        layout.addLayout(button_layout)
+        dialog.setLayout(layout)
+        
+        # 居中显示对话框
+        dialog.show()
+        dialog.setGeometry(
+            QStyle.alignedRect(
+                Qt.LeftToRight,
+                Qt.AlignCenter,
+                dialog.size(),
+                QApplication.desktop().availableGeometry()
+            )
+        )
+        
+        # 使用非阻塞方式显示对话框
+        dialog.open()
+    
+    def resume_selected_task(self, task_list, incomplete_tasks, dialog):
+        """恢复勾选的任务"""
+        from core.logger import get_logger
+        from PyQt5.QtWidgets import QMessageBox, QCheckBox
+        
+        logger = get_logger("MainWindow")
+        
+        # 查找所有勾选的任务
+        selected_indices = []
+        for i in range(task_list.count()):
+            item = task_list.item(i)
+            item_widget = task_list.itemWidget(item)
+            if item_widget:
+                # 获取勾选框
+                checkbox = item_widget.findChild(QCheckBox)
+                if checkbox and checkbox.isChecked():
+                    task_index = checkbox.property("task_index")
+                    if task_index is not None and task_index < len(incomplete_tasks):
+                        selected_indices.append(task_index)
+        
+        if not selected_indices:
+            QMessageBox.warning(dialog, "提示", "请至少勾选一个任务！")
+            return
+        
+        # 如果选择了多个任务，只恢复第一个（因为一次只能运行一个任务）
+        if len(selected_indices) > 1:
+            reply = QMessageBox.question(
+                dialog, 
+                "确认", 
+                f"您勾选了 {len(selected_indices)} 个任务，但一次只能恢复一个任务。是否恢复第一个勾选的任务？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        
+        selected_index = selected_indices[0]
+        selected_task = incomplete_tasks[selected_index]
+        
+        # 关闭对话框
+        dialog.accept()
+        
+        # 恢复选中的任务
+        try:
+            self.resume_task(selected_task, None)
+        except Exception as e:
+            import traceback
+            error_msg = f"继续任务时发生错误: {str(e)}\n\n详细信息:\n{traceback.format_exc()}"
+            logger.error(f"恢复任务失败: {error_msg}")
+            
+            # 创建错误对话框，保持窗口打开以便复制错误信息
+            from PyQt5.QtWidgets import QCheckBox
+            error_dialog = QMessageBox(dialog)
+            error_dialog.setWindowTitle("错误")
+            error_dialog.setIcon(QMessageBox.Critical)
+            error_dialog.setText("继续任务时发生错误")
+            error_dialog.setDetailedText(error_msg)
+            error_dialog.setStandardButtons(QMessageBox.Ok)
+            error_dialog.setDefaultButton(QMessageBox.Ok)
+            
+            # 添加复选框，让用户选择是否保持窗口打开
+            checkbox = QCheckBox("保持窗口打开以便复制错误信息")
+            error_dialog.setCheckBox(checkbox)
+            
+            # 显示错误对话框
+            error_dialog.exec_()
+            
+            # 如果用户勾选了复选框，再次显示错误对话框
+            if checkbox.isChecked():
+                error_dialog.setText("错误信息已保留，您可以复制错误信息")
+                error_dialog.setDetailedText(error_msg)
+                error_dialog.exec_()
+    
+    def resume_task(self, task_data, dialog):
+        """恢复任务
+        
+        Args:
+            task_data: 任务数据
+            dialog: 对话框对象
+        """
+        from core.account_manager import AccountManager
+        from core.logger import get_logger
+        
+        logger = get_logger("MainWindow")
+        
+        # 如果有对话框，则关闭它
+        if dialog:
+            dialog.accept()
+        
+        # 获取任务相关的账号信息
+        task_id = task_data.get('task_id')
+        if not task_id:
+            logger.error("任务ID为空，无法恢复任务")
+            return
+        
+        # 从任务ID中提取用户名
+        # 假设任务ID格式为: username_cid_uid_tasktype
+        parts = task_id.split('_')
+        if len(parts) < 4:
+            logger.error(f"任务ID格式不正确: {task_id}")
+            return
+        
+        username = parts[0]
+        
+        # 获取账号管理器
+        account_manager = AccountManager()
+        
+        # 查找对应的账号
+        accounts = account_manager.get_all_accounts()
+        target_account = None
+        
+        for account in accounts:
+            if account.username == username:
+                target_account = account
+                break
+        
+        if not target_account:
+            logger.error(f"未找到用户名为 {username} 的账号")
+            return
+        
+        logger.info(f"找到账号: {target_account.username}，准备恢复任务")
+        
+        # 打开账号详情对话框并传递任务数据
+        self.open_account_detail_with_resume(target_account, task_data)
+    
+    def delete_task_progress(self, incomplete_tasks, dialog):
+        """删除任务进度"""
+        from core.task_progress import TaskProgress
+        from core.logger import get_logger
+        from PyQt5.QtWidgets import QMessageBox
+        
+        logger = get_logger("MainWindow")
+        
+        # 关闭对话框
+        dialog.accept()
+        
+        # 创建任务进度管理器
+        progress_manager = TaskProgress()
+        
+        # 删除所有未完成的任务
+        deleted_count = 0
+        for task in incomplete_tasks:
+            task_id = task.get('task_id')
+            if task_id:
+                success = progress_manager.clear_task_progress(task_id)
+                if success:
+                    logger.info(f"已删除任务进度: {task_id}")
+                    deleted_count += 1
+                else:
+                    logger.error(f"删除任务进度失败: {task_id}")
+        
+        # 显示删除结果
+        if deleted_count > 0:
+            QMessageBox.information(self, "任务已删除", f"已成功删除 {deleted_count} 个未完成的任务")
+            logger.info(f"用户选择删除任务，共删除 {deleted_count} 个任务")
+        else:
+            QMessageBox.warning(self, "删除失败", "未能删除任何任务进度")
+            logger.warning("用户选择删除任务，但未能删除任何任务")
+    
+    def open_account_detail_with_resume(self, account, resume_task_data):
+        """打开账号详情对话框并传递恢复任务数据
+        
+        Args:
+            account: 账号对象
+            resume_task_data: 恢复任务数据
+        """
+        from core.logger import get_logger
+        logger = get_logger("MainWindow")
+        
+        username = account.username
+        logger.info(f"准备打开账号详情对话框并恢复任务 - 用户名: {username}")
+        
+        if username in self.detail_dialogs:
+            dialog = self.detail_dialogs[username]
+            if dialog.isVisible():
+                dialog.raise_()
+                dialog.activateWindow()
+                logger.info(f"账号详情对话框已存在且可见，激活窗口 - 用户名: {username}")
+                return
+            else:
+                del self.detail_dialogs[username]
+        
+        # 创建账号详情对话框并传递恢复任务数据
+        dialog = AccountDetailDialog(account, self, resume_task_data=resume_task_data)
+        dialog.status_updated.connect(self.on_account_status_updated)
+        dialog.finished.connect(lambda result, u=username: self.on_detail_closed(u))
+        
+        self.detail_dialogs[username] = dialog
+        
+        # 显示对话框并确保它在前台
+        dialog.show()
+        
+        # 使用定时器多次确保对话框在前台
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(100, lambda: self._ensure_dialog_foreground(dialog))
+        QTimer.singleShot(500, lambda: self._ensure_dialog_foreground(dialog))
+        QTimer.singleShot(1000, lambda: self._ensure_dialog_foreground(dialog))
+        
+        self.status_bar.showMessage(f"已打开账号详情: {username} (恢复任务)")
+        logger.info(f"账号详情对话框已打开 - 用户名: {username}")
+    
+    def _ensure_dialog_foreground(self, dialog):
+        """确保对话框在前台显示"""
+        try:
+            if dialog.isVisible():
+                dialog.raise_()
+                dialog.activateWindow()
+                dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+                dialog.show()
+                dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowStaysOnTopHint)
+                dialog.show()
+                from core.logger import get_logger
+                logger = get_logger("MainWindow")
+                logger.info(f"已确保对话框在前台显示")
+        except Exception as e:
+            from core.logger import get_logger
+            logger = get_logger("MainWindow")
+            logger.error(f"确保对话框在前台显示时出错: {str(e)}")
+            from core.logger import get_logger
+            logger = get_logger("MainWindow")
+            logger.error(f"确保对话框在前台显示时出错: {str(e)}")
+    
     def get_background_path(self):
         """获取背景图片路径（考虑打包后的环境）"""
         if getattr(sys, 'frozen', False):
@@ -352,7 +738,7 @@ class WeLearnUI(QMainWindow):
         
         warning_text = """版权声明：
 
-本软件为WeLearn学习助手V4.6.5版本，由ZR修改并打包。
+本软件为WeLearn学习助手V5.0.6版本，由ZR修改并打包。
 
 使用条款：
 1. 本软件仅供学习交流使用，严禁用于任何商业用途
@@ -407,7 +793,7 @@ class WeLearnUI(QMainWindow):
         dont_show = settings.value("General/dont_show_update_announcement", False, type=bool)
         announcement_shown = settings.value("General/announcement_shown", False, type=bool)
         last_version = settings.value("General/last_version", "", type=str)
-        current_version = "V4.6.5"  # 更新当前版本号
+        current_version = "V5.0.7"  # 更新当前版本号
         
         print(f"更新公告设置: 不再提醒={dont_show}")
         print(f"公告已显示={announcement_shown}")
@@ -460,6 +846,31 @@ class WeLearnUI(QMainWindow):
 
         
         # 最新更新公告
+        announcement_content += "V5.0.7\n"
+        announcement_content += "-修复了继续任务功能无法打开详情页的问题\n"
+        announcement_content += "-优化了任务恢复流程，确保课程和单元数据加载完成后再恢复任务\n"
+        announcement_content += "-修复了任务恢复时窗口不激活的问题\n"
+        announcement_content += "-修复了变量初始化顺序问题，防止auto_login_attempted未定义错误\n"
+        announcement_content += "-增强了窗口显示逻辑，确保对话框始终在前台显示\n"
+        announcement_content += "-添加了详细的日志记录，便于调试和追踪问题\n"
+        announcement_content += "-更新了版本号到V5.0.7\n\n"
+        
+        announcement_content += "V5.0.6\n"
+        announcement_content += "-修复了继续任务功能无法打开详情页的问题\n"
+        announcement_content += "-优化了任务恢复流程，确保课程和单元数据加载完成后再恢复任务\n"
+        announcement_content += "-修复了任务恢复时窗口不激活的问题\n"
+        announcement_content += "-更新了版本号到V5.0.6\n\n"
+        
+        announcement_content += "V5.0.5\n"
+        announcement_content += "-修复了勾选任务选择继续进行后仍然没有继续任务的问题\n"
+        announcement_content += "-优化了任务恢复时的线程启动逻辑\n"
+        announcement_content += "-更新了版本号到V5.0.5\n\n"
+        
+        announcement_content += "V5.0.1\n"
+        announcement_content += "-优化了任务恢复对话框，现在与主UI同时显示，提升用户体验\n"
+        announcement_content += "-修复了任务恢复功能，确保未完成任务能够正确继续\n"
+        announcement_content += "-改进了任务进度保存机制，提高了数据可靠性\n\n"
+        
         announcement_content += "V4.6.6\n"
         announcement_content += "-修复了暂停选择彻底关闭依旧无响应的问题\n"
         announcement_content += "-由于继续任务功能bug无法修复，我迫不得已删除此功能\n\n"
