@@ -42,7 +42,20 @@ class AddAccountDialog(QDialog):
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.set_input_transparency(self.password_input)
         layout.addWidget(QLabel("密码:"))
-        layout.addWidget(self.password_input)
+        
+        # 创建密码输入框和显示按钮的水平布局
+        password_layout = QHBoxLayout()
+        password_layout.addWidget(self.password_input)
+        
+        # 添加显示密码按钮
+        self.show_password_btn = QPushButton("显示")
+        self.show_password_btn.setCheckable(True)
+        self.show_password_btn.setFixedWidth(60)
+        self.show_password_btn.clicked.connect(self.toggle_password_visibility)
+        self.set_button_transparency(self.show_password_btn)
+        password_layout.addWidget(self.show_password_btn)
+        
+        layout.addLayout(password_layout)
         
         self.nickname_input = QLineEdit()
         self.nickname_input.setPlaceholderText("昵称（可选，方便识别）")
@@ -58,6 +71,35 @@ class AddAccountDialog(QDialog):
         button_layout.addWidget(ok_btn)
         button_layout.addWidget(cancel_btn)
         layout.addLayout(button_layout)
+    
+    def toggle_password_visibility(self):
+        """切换密码可见性"""
+        if self.show_password_btn.isChecked():
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.show_password_btn.setText("隐藏")
+        else:
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.show_password_btn.setText("显示")
+    
+    def set_button_transparency(self, button_widget):
+        """设置按钮为半透明样式"""
+        button_widget.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 255, 255, 180);
+                border: 1px solid rgba(200, 200, 200, 200);
+                border-radius: 5px;
+                padding: 5px;
+                color: #333333;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 200);
+                border: 1px solid rgba(100, 150, 255, 200);
+            }
+            QPushButton:checked {
+                background-color: rgba(100, 150, 255, 180);
+                color: white;
+            }
+        """)
     
     def set_input_transparency(self, input_widget):
         """设置输入框为半透明样式"""
@@ -81,6 +123,17 @@ class AddAccountDialog(QDialog):
             self.password_input.text().strip(),
             self.nickname_input.text().strip()
         )
+    
+    def keyPressEvent(self, event):
+        """处理键盘事件，使回车键可以提交表单"""
+        if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            # 如果焦点在密码输入框，不要触发显示密码功能，而是提交表单
+            if self.password_input.hasFocus():
+                self.accept()
+            else:
+                super().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
     
     def set_background(self):
         if getattr(sys, 'frozen', False):

@@ -9,13 +9,14 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
     QListWidget, QListWidgetItem, QLabel, QTextEdit, QMessageBox,
-    QComboBox, QSpinBox, QSplitter, QWidget, QProgressBar
+    QComboBox, QSpinBox, QSplitter, QWidget, QProgressBar, QCheckBox
 )
 from PyQt5.QtGui import QPixmap, QPainter, QBrush, QColor
 from PyQt5.QtMultimedia import QSound
 from core.api import WeLearnClient
 from core.account_manager import Account
 from core.task_progress import TaskProgress
+
 
 
 # 直接导入workers模块，避免使用ui.workers
@@ -67,6 +68,7 @@ class AccountDetailDialog(QDialog):
         self.course_thread = None
         self.units_thread = None
         self.study_thread = None  # 刷作业/刷时长通用
+        self.stats_thread = None  # 新增
         
         self.init_ui()
         self.setWindowTitle(f"账号管理 - {account.nickname or account.username}")
@@ -77,6 +79,11 @@ class AccountDetailDialog(QDialog):
     
     def showEvent(self, event):
         """对话框显示时自动登录"""
+        print(f"\n[AccountDetail] showEvent - 账号: {self.account.username}")
+        print(f"  resume_task_data: {self.resume_task_data}")
+        print(f"  is_logged_in: {self.is_logged_in}")
+        print(f"  auto_login_attempted: {self.auto_login_attempted}")
+        
         from core.logger import get_logger
         logger = get_logger("AccountDetail")
         
@@ -87,16 +94,24 @@ class AccountDetailDialog(QDialog):
         if not self.auto_login_attempted and not self.is_logged_in:
             self.auto_login_attempted = True
             logger.info(f"准备自动登录 - 账号: {self.account.username}")
+            print(f"  ✅ 准备自动登录")
             
             # 延迟一点时间再执行登录，确保界面完全显示
             from PyQt5.QtCore import QTimer
             QTimer.singleShot(500, self.do_login)
+            print(f"  ✅ 已安排500ms后执行登录")
             
             # 如果有恢复任务的数据，将在登录成功后自动恢复任务
             if self.resume_task_data:
                 logger.info(f"检测到恢复任务数据，将在登录成功后恢复任务 - 账号: {self.account.username}")
+                print(f"  ✅ 检测到恢复任务数据，将在登录成功后恢复")
+                # 标记需要恢复任务，在课程和单元加载完成后自动恢复
+                self.need_resume_task = True
         else:
             logger.info(f"已登录或已尝试登录，跳过自动登录 - 账号: {self.account.username}, 已登录: {self.is_logged_in}, 已尝试: {self.auto_login_attempted}")
+            print(f"  ⚠️ 已登录或已尝试登录，跳过自动登录")
+        
+        print(f"[AccountDetail] showEvent 完成\n")
     
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -188,14 +203,38 @@ class AccountDetailDialog(QDialog):
         homework_layout = QVBoxLayout(self.homework_widget)
         homework_layout.setContentsMargins(0, 0, 0, 0)
         
-        # 第一行：正确率
+        # 第一行：正确率设置
         homework_row1 = QHBoxLayout()
         homework_row1.addWidget(QLabel("正确率:"))
+        
+        # 固定正确率设置
         self.accuracy_spin = QSpinBox()
         self.accuracy_spin.setRange(0, 100)
         self.accuracy_spin.setValue(100)
         self.accuracy_spin.setSuffix("%")
         homework_row1.addWidget(self.accuracy_spin)
+        
+        # 正确率范围设置
+        self.accuracy_range_checkbox = QCheckBox("启用范围")
+        self.accuracy_range_checkbox.setToolTip("启用后将在指定范围内随机选择正确率")
+        homework_row1.addWidget(self.accuracy_range_checkbox)
+        
+        self.accuracy_min_spin = QSpinBox()
+        self.accuracy_min_spin.setRange(0, 100)
+        self.accuracy_min_spin.setValue(80)
+        self.accuracy_min_spin.setSuffix("%")
+        self.accuracy_min_spin.setEnabled(False)  # 默认禁用
+        homework_row1.addWidget(QLabel("最小:"))
+        homework_row1.addWidget(self.accuracy_min_spin)
+        
+        self.accuracy_max_spin = QSpinBox()
+        self.accuracy_max_spin.setRange(0, 100)
+        self.accuracy_max_spin.setValue(100)
+        self.accuracy_max_spin.setSuffix("%")
+        self.accuracy_max_spin.setEnabled(False)  # 默认禁用
+        homework_row1.addWidget(QLabel("最大:"))
+        homework_row1.addWidget(self.accuracy_max_spin)
+        
         homework_row1.addStretch()
         homework_layout.addLayout(homework_row1)
         
@@ -209,6 +248,9 @@ class AccountDetailDialog(QDialog):
         homework_row2.addWidget(self.homework_concurrent_spin)
         homework_row2.addStretch()
         homework_layout.addLayout(homework_row2)
+        
+        # 连接正确率范围复选框的信号
+        self.accuracy_range_checkbox.stateChanged.connect(self.on_accuracy_range_changed)
         
         settings_layout.addWidget(self.homework_widget)
         
@@ -336,20 +378,37 @@ class AccountDetailDialog(QDialog):
         """执行登录"""
         from core.logger import get_logger
         logger = get_logger("AccountDetail")
-        
+
+        if self.is_logged_in:
+            logger.info("已经登录，跳过重复登录")
+            return
+
         logger.info(f"开始登录 - 账号: {self.account.username}")
         self.login_btn.setEnabled(False)
         self.login_btn.setText("登录中...")
-        self.log("正在登录...")
-        self.update_status("登录中")
-        
-        logger.info(f"创建登录线程 - 账号: {self.account.username}")
-        self.login_thread = LoginThread(self.client, self.account.username, self.account.password)
+        self.update_status("正在登录...")
+
+        # 创建登录线程
+        self.login_thread = LoginThread(
+            self.client,
+            self.account.username,
+            self.account.password
+        )
+
+        # 连接信号
         self.login_thread.login_result.connect(self.on_login_result)
+
+        # 启动线程
         self.login_thread.start()
     
-    def on_login_result(self, success: bool, message: str):
+    def on_login_result(self, success: bool, message: str, user_id: str = ""):
         """登录结果回调"""
+        print(f"\n[AccountDetail] on_login_result - 账号: {self.account.username}")
+        print(f"  success: {success}")
+        print(f"  message: {message}")
+        print(f"  user_id: {user_id}")
+        print(f"  resume_task_data: {self.resume_task_data}")
+        
         from core.logger import get_logger
         logger = get_logger("AccountDetail")
         
@@ -360,21 +419,41 @@ class AccountDetailDialog(QDialog):
             self.login_btn.setText("✅ 已登录")
             self.login_btn.setEnabled(False)
             self.refresh_courses_btn.setEnabled(True)
-            self.log(f"✅ 登录成功")
-            logger.info(f"登录成功 - 账号: {self.account.username}")
+            
+            # 存储用户ID
+            if user_id:
+                self.uid = user_id
+                self.log(f"✅ 登录成功，用户ID: {user_id}")
+                logger.info(f"登录成功，用户ID: {user_id} - 账号: {self.account.username}")
+                print(f"[DEBUG] 用户ID已设置: {self.uid}")  # 添加这行
+                if hasattr(self, 'user_id_label'):
+                    self.user_id_label.setText(f"用户ID: {user_id}")
+            else:
+                self.log(f"✅ 登录成功，但未能获取用户ID")
+                logger.warning(f"登录成功但未能获取用户ID - 账号: {self.account.username}")
+                print(f"[DEBUG] 登录返回的uid为空")  # 添加这行
+            
+            print(f"  ✅ 登录成功，更新UI状态")
             self.update_status("已登录")
+            
             # 自动刷新课程
+            print(f"  ✅ 准备刷新课程")
             self.refresh_courses()
             
             # 如果有恢复任务的数据，登录成功后立即恢复任务
             if self.resume_task_data:
                 logger.info(f"检测到恢复任务数据，将在课程刷新后恢复任务 - 账号: {self.account.username}")
+                print(f"  ✅ 检测到恢复任务数据，将在课程刷新后恢复")
                 # 标记需要恢复任务，在课程和单元加载完成后自动恢复
                 self.need_resume_task = True
                 
                 # 使用定时器确保对话框在前台
                 from PyQt5.QtCore import QTimer
                 QTimer.singleShot(1000, self._ensure_foreground_and_resume)
+                print(f"  ✅ 已安排1000ms后确保前台并恢复任务")
+                
+                # 延迟一段时间后尝试恢复任务，确保课程刷新开始
+                QTimer.singleShot(2000, self._try_resume_task)
         else:
             self.login_btn.setText("🔐 登录")
             self.log(f"❌ 登录失败: {message}")
@@ -386,6 +465,44 @@ class AccountDetailDialog(QDialog):
             msg_box.exec_()
     
     def _ensure_foreground_and_resume(self):
+        """确保对话框在前台，然后开始恢复流程"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+
+        try:
+            # 确保窗口在前台
+            self.raise_()
+            self.activateWindow()
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+
+            logger.info(f"确保对话框在前台 - 账号: {self.account.username}")
+
+            # 检查是否需要恢复任务
+            if self.need_resume_task and self.resume_task_data:
+                logger.info(f"开始执行任务恢复流程 - 账号: {self.account.username}")
+                # 自动刷新课程，这会触发单元获取，然后自动恢复任务
+                if hasattr(self, 'refresh_courses') and callable(self.refresh_courses):
+                    self.refresh_courses()
+                else:
+                    logger.error("缺少 refresh_courses 方法！")
+            else:
+                logger.info(f"不需要恢复任务 - 账号: {self.account.username}")
+
+        except Exception as e:
+            logger.error(f"确保前台和恢复任务时出错: {str(e)}", exc_info=True)
+            
+    def _ensure_foreground_after_resume(self):
+        """确保任务恢复后窗口在前台"""
+        try:
+            self.raise_()
+            self.activateWindow()
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+        except Exception as e:
+            from core.logger import get_logger
+            logger = get_logger("AccountDetail")
+            logger.error(f"确保前台时出错: {str(e)}")
+            
+    def _ensure_foreground_and_resume_old(self):
         """确保对话框在前台并准备恢复任务"""
         try:
             self.raise_()
@@ -398,21 +515,128 @@ class AccountDetailDialog(QDialog):
             logger = get_logger("AccountDetail")
             logger.error(f"确保对话框在前台显示时出错: {str(e)}")
     
+    def _try_resume_task(self):
+        """尝试恢复任务"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+        
+        try:
+            if self.need_resume_task and self.resume_task_data:
+                logger.info(f"尝试恢复任务 - 账号: {self.account.username}")
+                self.resume_task()
+        except Exception as e:
+            logger.error(f"尝试恢复任务时出错: {str(e)}", exc_info=True)
+    
     def refresh_courses(self):
         """刷新课程列表"""
         from core.logger import get_logger
         logger = get_logger("AccountDetail")
-        
-        logger.info(f"开始获取课程列表 - 账号: {self.account.username}")
+
+        if not self.is_logged_in:
+            logger.warning("未登录，无法刷新课程")
+            self.log("❌ 请先登录")
+            return
+
+        logger.info(f"开始刷新课程 - 账号: {self.account.username}")
         self.refresh_courses_btn.setEnabled(False)
-        self.refresh_courses_btn.setText("获取中...")
-        self.log("正在获取课程列表...")
-        
-        logger.info(f"创建课程获取线程 - 账号: {self.account.username}")
+        self.refresh_courses_btn.setText("刷新中...")
+        self.update_status("正在获取课程列表...")
+
+        # 创建课程线程
         self.course_thread = CourseThread(self.client)
-        self.course_thread.course_result.connect(self.on_courses_result)
+
+        # 连接信号
+        self.course_thread.course_result.connect(self.on_course_result)
+
+        # 启动线程
         self.course_thread.start()
     
+    def on_course_result(self, success: bool, data: list, message: str):
+        """课程列表结果回调"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+
+        self.refresh_courses_btn.setEnabled(True)
+        self.refresh_courses_btn.setText("刷新课程")
+
+        if success:
+            self.courses = data
+
+            # 检查是否已有用户ID（从登录时获取）
+            if hasattr(self, 'uid') and self.uid:
+                # 使用登录时获取的用户ID
+                uid = self.uid
+                logger.info(f"使用登录时获取的用户ID: {uid} - 账号: {self.account.username}")
+            else:
+                # 尝试获取用户ID
+                success_get_uid, uid, uid_message = self.client.get_user_id()
+                if not success_get_uid:
+                    self.log(f"⚠️ 获取用户ID失败: {uid_message}")
+                    logger.warning(f"获取用户ID失败 - 账号: {self.account.username}, 错误: {uid_message}")
+                    # 即使获取用户ID失败，也继续加载课程列表，但不显示学习时长
+                    self.courses_list.clear()
+                    course_names = []
+                    for course in self.courses:
+                        progress = course.get('per', '未知')
+                        # 显示课程信息，但不包含学习时长
+                        item = QListWidgetItem(f"{course['name']} (进度: {progress}%)")
+                        item.setData(Qt.ItemDataRole.UserRole, course)
+                        self.courses_list.addItem(item)
+                        course_names.append(course['name'])
+                    
+                    self.log(f"✅ 获取到 {len(self.courses)} 门课程")
+                    logger.info(f"课程列表获取成功 - 账号: {self.account.username}, 课程: {', '.join(course_names)}")
+                    
+                    # 如果是从任务恢复进来的，自动选中对应课程
+                    if self.resume_task_data and self.need_resume_task:
+                        target_cid = self.resume_task_data.get('cid')
+                        for i in range(self.courses_list.count()):
+                            item = self.courses_list.item(i)
+                            course = item.data(Qt.ItemDataRole.UserRole)
+                            if course and course['cid'] == target_cid:
+                                self.courses_list.setCurrentItem(item)
+                                self.current_course = course
+                                self.current_course_label.setText(course['name'])
+                                self.get_units()
+                                break
+                    return
+
+            # 设置用户ID
+            self.uid = uid
+
+            # 填充课程列表
+            self.courses_list.clear()
+            course_names = []
+            for course in self.courses:
+                # 获取课程进度，如果没有则显示未知
+                progress = course.get('per', '未知')
+                item = QListWidgetItem(f"{course['name']} (进度: {progress}%)")
+                item.setData(Qt.ItemDataRole.UserRole, course)
+                self.courses_list.addItem(item)
+                course_names.append(course['name'])
+
+            self.log(f"✅ 获取到 {len(self.courses)} 门课程")
+            logger.info(f"课程列表获取成功 - 账号: {self.account.username}, 课程: {', '.join(course_names)}")
+
+            # 如果是从任务恢复进来的，自动选中对应课程
+            if self.resume_task_data and self.need_resume_task:
+                target_cid = self.resume_task_data.get('cid')
+                for i in range(self.courses_list.count()):
+                    item = self.courses_list.item(i)
+                    course = item.data(Qt.ItemDataRole.UserRole)
+                    if course and course['cid'] == target_cid:
+                        self.courses_list.setCurrentItem(item)
+                        self.current_course = course
+                        self.current_course_label.setText(course['name'])
+                        # 自动获取单元
+                        self.get_units()
+                        break
+        else:
+            self.log(f"❌ 获取课程失败: {message}")
+            logger.error(f"课程列表获取失败 - 账号: {self.account.username}, 错误: {message}")
+    
+
+
     def on_courses_result(self, success: bool, courses: list, message: str):
         """课程列表结果回调"""
         from core.logger import get_logger
@@ -460,28 +684,54 @@ class AccountDetailDialog(QDialog):
         self.get_units()
     
     def get_units(self):
-        """获取单元信息"""
+        """获取单元列表"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+
         if not self.current_course:
+            logger.warning("没有选择课程，无法获取单元")
+            self.log("❌ 请先选择课程")
             return
-        
+
+        if not self.is_logged_in:
+            logger.warning("未登录，无法获取单元")
+            self.log("❌ 请先登录")
+            return
+
+        logger.info(f"开始获取单元 -课程: {self.current_course['name']}")
         self.unit_list.clear()
         self.start_btn.setEnabled(False)
-        self.log("正在获取单元信息...")
-        
-        self.units_thread = UnitsThread(self.client, self.current_course['cid'])
+        self.update_status(f"正在获取 {self.current_course['name']} 的单元...")
+
+        # 创建单元线程
+        self.units_thread = UnitsThread(
+            self.client,
+            self.current_course['cid']
+        )
+
+        # 连接信号
         self.units_thread.units_result.connect(self.on_units_result)
+
+        # 启动线程
         self.units_thread.start()
     
-    def on_units_result(self, success: bool, units_data: list, message: str):
+    def on_units_result(self, success: bool, units_data: dict, message: str):
         """单元信息结果回调"""
+        print(f"\n[AccountDetail] on_units_result - 账号: {self.account.username}")
+        print(f"  success: {success}")
+        print(f"  need_resume_task: {self.need_resume_task}")
+        print(f"  resume_task_data: {self.resume_task_data is not None}")
+        
         from core.logger import get_logger
         logger = get_logger("AccountDetail")
         
         if success and units_data:
-            data = units_data[0]
+            # units_data 已经是字典，不需要索引访问
+            data = units_data
             self.uid = data['uid']
             self.classid = data['classid']
             self.current_units = data['units']
+            print(f"  ✅ 成功获取单元数据，共 {len(self.current_units)} 个单元")
             
             # 填充复选框列表
             self.unit_list.clear()
@@ -497,13 +747,15 @@ class AccountDetailDialog(QDialog):
             self.start_btn.setEnabled(True)
             self.log(f"✅ 获取到 {len(self.current_units)} 个单元")
             logger.info(f"单元列表获取成功 - 账号: {self.account.username}, 课程: {self.current_course['name']}, 单元数量: {len(self.current_units)}, 单元: {', '.join(unit_names)}")
+            print(f"  ✅ 单元列表已填充，启用开始按钮")
             
             # 如果需要恢复任务，现在开始恢复
             if self.need_resume_task and self.resume_task_data:
                 logger.info(f"课程和单元数据已加载完成，开始恢复任务")
+                print(f"  ✅ 检测到需要恢复任务，准备调用resume_task")
                 # 使用单次定时器确保UI更新完成后再恢复任务
                 from PyQt5.QtCore import QTimer
-                QTimer.singleShot(500, self.resume_task)
+                QTimer.singleShot(500, self._try_resume_task)
         else:
             self.log(f"❌ 获取单元失败: {message}")
             logger.error(f"单元列表获取失败 - 账号: {self.account.username}, 课程: {self.current_course['name']}, 错误: {message}")
@@ -636,9 +888,17 @@ class AccountDetailDialog(QDialog):
         self.progress_bar.setRange(0, 0)  # 不确定进度
         
         if mode == "刷作业":
-            accuracy_config = self.accuracy_spin.value()
+            # 根据复选框状态决定正确率配置
+            if self.accuracy_range_checkbox.isChecked():
+                # 使用正确率范围
+                accuracy_config = (self.accuracy_min_spin.value(), self.accuracy_max_spin.value())
+                logger.info(f"刷作业配置 - 正确率范围: {accuracy_config[0]}%-{accuracy_config[1]}%, 并发数: {homework_concurrent}")
+            else:
+                # 使用固定正确率
+                accuracy_config = self.accuracy_spin.value()
+                logger.info(f"刷作业配置 - 正确率: {accuracy_config}%, 并发数: {homework_concurrent}")
+            
             homework_concurrent = self.homework_concurrent_spin.value()
-            logger.info(f"刷作业配置 - 正确率: {accuracy_config}%, 并发数: {homework_concurrent}")
             self.log(f"开始刷作业 (已选 {len(units_to_process)} 个单元, {homework_concurrent} 并发)...")
             self.update_status("运行中")
             
@@ -725,7 +985,7 @@ class AccountDetailDialog(QDialog):
             )
         
         logger.info("任务线程创建完成，连接信号并启动")
-        self.study_thread.progress_update.connect(self.on_progress_update)
+        self.study_thread.progress_update.connect(self.handle_progress_update)
         self.study_thread.study_finished.connect(self.on_study_finished)
         self.study_thread.start()
     
@@ -773,14 +1033,29 @@ class AccountDetailDialog(QDialog):
         self.log("⏹️ 任务已停止")
         self.update_status("已停止")
     
-    def on_progress_update(self, status: str, message: str):
-        """进度更新回调"""
+    def handle_progress_update(self, status_type: str, message: str):
+        """处理学习进度更新"""
         from core.logger import get_logger
         logger = get_logger("AccountDetail")
         
-        self.log(message)
-        logger.debug(f"任务进度更新: {message}")
-        self.update_status("运行中", status)
+        if status_type == "start":
+            self.log(f"开始: {message}")
+        elif status_type == "finish":
+            self.log(f"完成: {message}")
+        elif status_type == "skip":
+            self.log(f"跳过: {message}")
+        elif status_type == "completed":
+            self.log(f"已完成: {message}")
+        elif status_type == "error":
+            self.log(f"错误: {message}")
+        elif status_type == "unit_start":
+            self.log(message)
+        elif status_type == "unit_finish":
+            self.log(message)
+        elif status_type == "info":
+            self.log(f"信息: {message}")
+        else:
+            self.log(message)
     
     def on_study_finished(self, result: dict):
         """任务完成回调"""
@@ -793,15 +1068,46 @@ class AccountDetailDialog(QDialog):
         
         mode = self.mode_combo.currentText()
         if mode == "刷作业":
-            msg = f"步骤1成功: {result.get('way1_succeed', 0)}, 失败: {result.get('way1_failed', 0)}\n"
-            msg += f"步骤2成功: {result.get('way2_succeed', 0)}, 失败: {result.get('way2_failed', 0)}"
+            way1_success = result.get('way1_succeed', 0)
+            way1_failed = result.get('way1_failed', 0)
+            way2_success = result.get('way2_succeed', 0)
+            way2_failed = result.get('way2_failed', 0)
+            
+            # 计算成功率
+            total_way1 = way1_success + way1_failed
+            total_way2 = way2_success + way2_failed
+            way1_rate = f"{(way1_success/total_way1*100):.1f}%" if total_way1 > 0 else "0%"
+            way2_rate = f"{(way2_success/total_way2*100):.1f}%" if total_way2 > 0 else "0%"
+            
+            # 创建更友好的统计信息
+            msg = f"📊 刷作业任务完成统计:\n"
+            msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            msg += f"📝 步骤1 (视频/文档): 成功 {way1_success} 个, 失败 {way1_failed} 个 (成功率: {way1_rate})\n"
+            msg += f"✏️  步骤2 (测验/作业): 成功 {way2_success} 个, 失败 {way2_failed} 个 (成功率: {way2_rate})\n"
+            msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            msg += f"🎯 总计: 成功 {way1_success + way2_success} 个, 失败 {way1_failed + way2_failed} 个"
+            
             self.log(f"✅ 刷作业完成！\n{msg}")
-            logger.info(f"刷作业任务完成 - 账号: {self.account.username}, 课程: {self.current_course['name']}, 结果: {msg}")
+            logger.info(f"刷作业任务完成 - 账号: {self.account.username}, 课程: {self.current_course['name']}, 步骤1: {way1_success}/{total_way1}, 步骤2: {way2_success}/{total_way2}")
         else:
             completed_units = result.get('completed_units', 0)
-            total_units = len(self.current_units) if self.current_units else 0
-            self.log(f"✅ 刷时长完成！已完成 {completed_units}/{total_units} 个单元")
+            # 获取选中的单元数量，而不是所有单元数量
+            total_units = len(self.study_thread.unit_idx) if hasattr(self.study_thread, 'unit_idx') and self.study_thread.unit_idx else (len(self.current_units) if self.current_units else 0)
+            completion_rate = f"{(completed_units/total_units*100):.1f}%" if total_units > 0 else "0%"
+            
+            msg = f"📊 刷时长任务完成统计:\n"
+            msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            msg += f"⏰ 已完成单元: {completed_units}/{total_units} (完成率: {completion_rate})\n"
+            msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            msg += f"🎯 任务已全部完成"
+            
+            self.log(f"✅ 刷时长完成！\n{msg}")
             logger.info(f"刷时长任务完成 - 账号: {self.account.username}, 课程: {self.current_course['name']}, 完成单元: {completed_units}/{total_units}")
+        
+        # 标记任务为已完成
+        if hasattr(self, 'study_thread') and self.study_thread and hasattr(self.study_thread, 'task_id') and self.study_thread.task_id:
+            self.progress_manager.mark_task_completed(self.study_thread.task_id)
+            logger.info(f"任务已标记为完成 - 任务ID: {self.study_thread.task_id}")
         
         # 播放提示音
         try:
@@ -826,6 +1132,21 @@ class AccountDetailDialog(QDialog):
         # 清理线程引用
         self.study_thread = None
         logger.debug("任务线程引用已清理")
+    
+    def on_accuracy_range_changed(self, state):
+        """处理正确率范围复选框状态变化"""
+        is_checked = state == 2  # Qt.Checked = 2
+        
+        if is_checked:
+            # 启用范围设置，禁用固定正确率
+            self.accuracy_spin.setEnabled(False)
+            self.accuracy_min_spin.setEnabled(True)
+            self.accuracy_max_spin.setEnabled(True)
+        else:
+            # 禁用范围设置，启用固定正确率
+            self.accuracy_spin.setEnabled(True)
+            self.accuracy_min_spin.setEnabled(False)
+            self.accuracy_max_spin.setEnabled(False)
     
     def closeEvent(self, event):
         """关闭窗口时清理线程"""
@@ -1006,16 +1327,23 @@ class AccountDetailDialog(QDialog):
     
     def resume_task(self):
         """恢复任务"""
+        print(f"\n[AccountDetail] resume_task - 账号: {self.account.username}")
+        print(f"  resume_task_data: {self.resume_task_data}")
+        print(f"  is_logged_in: {self.is_logged_in}")
+        print(f"  courses: {len(self.courses) if self.courses else 0}")
+        
         from core.logger import get_logger
         logger = get_logger("AccountDetail")
         
         try:
             if not self.resume_task_data:
                 logger.warning("没有恢复任务数据")
+                print(f"  ❌ 没有恢复任务数据")
                 return
             
             if not self.is_logged_in:
                 logger.warning("账号未登录，无法恢复任务")
+                print(f"  ⚠️ 账号未登录，1秒后重试")
                 # 延迟1秒后再次尝试
                 from PyQt5.QtCore import QTimer
                 QTimer.singleShot(1000, self.resume_task)
@@ -1024,6 +1352,7 @@ class AccountDetailDialog(QDialog):
             # 检查课程数据是否已加载
             if not self.courses:
                 logger.warning("课程数据未加载，无法恢复任务")
+                print(f"  ⚠️ 课程数据未加载，1秒后重试")
                 from PyQt5.QtCore import QTimer
                 QTimer.singleShot(1000, self.resume_task)
                 return
@@ -1031,16 +1360,21 @@ class AccountDetailDialog(QDialog):
             # 检查UI是否已完全加载课程列表
             if self.courses_list.count() == 0:
                 logger.warning("课程列表UI未加载，无法恢复任务")
+                print(f"  ⚠️ 课程列表UI未加载，1秒后重试")
                 from PyQt5.QtCore import QTimer
                 QTimer.singleShot(1000, self.resume_task)
                 return
             
-            logger.info(f"开始恢复任务 - 账号: {self.account.username}, 任务ID: {self.resume_task_data.get('task_id')}")
-            self.log(f"正在恢复任务: {self.resume_task_data.get('task_type', '未知任务')}")
+            task_id = self.resume_task_data.get('task_id', '未知ID')
+            task_type = self.resume_task_data.get('task_type', '未知任务')
+            logger.info(f"开始恢复任务 - 账号: {self.account.username}, 任务ID: {task_id}")
+            print(f"  ✅ 开始恢复任务: {task_type} (ID: {task_id})")
+            self.log(f"正在恢复任务: {task_type}")
             
             # 确保对话框在前台
             self.raise_()
             self.activateWindow()
+            print(f"  ✅ 确保对话框在前台")
             
             # 获取任务数据
             task_type = self.resume_task_data.get('task_type')
@@ -1052,21 +1386,43 @@ class AccountDetailDialog(QDialog):
             completed_units = self.resume_task_data.get('completed_units', [])
             task_config = self.resume_task_data.get('task_config', {})
             
+            logger.info(f"恢复任务数据 - 类型: {task_type}, 课程ID: {cid}, 用户ID: {uid}, 班级ID: {classid}")
+            logger.info(f"单元数据 - 待处理: {unit_indices}, 已完成: {completed_units}, 当前单元数: {len(current_units)}")
+            print(f"  ✅ 任务数据解析完成")
+            
             # 查找对应的课程
             target_course = None
+            
+            # 🔧 修改：处理课程ID不匹配的情况
+            print(f"\n[AccountDetail] resume_task - 开始恢复")
+            print(f"恢复数据中的CID: {self.resume_task_data.get('cid')}")
+            print(f"可用课程: {[c['cid'] for c in self.courses]}")
+            
+            # 方案1：精确匹配
             for course in self.courses:
-                if course['cid'] == cid:
+                if str(course['cid']) == str(cid):
                     target_course = course
                     break
             
+            # 方案2：如果找不到，使用第一门课程（临时方案）
             if not target_course:
-                logger.error(f"未找到课程ID为 {cid} 的课程")
-                self.log(f"错误: 未找到对应的课程，无法恢复任务")
-                msg_box = QMessageBox(QMessageBox.Warning, "错误", "未找到对应的课程，无法恢复任务")
-                # 移除问号帮助按钮
-                msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-                msg_box.exec_()
+                logger.warning(f"未找到课程ID为 {cid} 的课程，使用第一门课程")
+                self.log(f"⚠️ 未找到课程ID {cid}，使用第一门课程")
+                if self.courses:
+                    target_course = self.courses[0]
+                    cid = target_course['cid']  # 更新cid
+                    self.log(f"✅ 使用课程: {target_course['name']} (CID: {cid})")
+            
+            if not target_course:
+                logger.error(f"未找到对应课程，无法恢复任务")
+                self.log(f"❌ 未找到对应的课程，无法恢复任务")
+                from PyQt5.QtWidgets import QMessageBox
+                msg = QMessageBox(QMessageBox.Warning, "错误", "未找到对应的课程，无法恢复任务")
+                msg.setWindowFlags(msg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+                msg.exec_()
                 return
+            
+            logger.info(f"找到目标课程: {target_course['name']}")
             
             # 设置当前课程
             self.current_course = target_course
@@ -1086,6 +1442,7 @@ class AccountDetailDialog(QDialog):
             
             # 如果单元数据还没有加载，先加载单元数据
             if not self.current_units or len(self.current_units) != len(current_units):
+                logger.info(f"单元数据未加载或数量不匹配，设置单元数据 - 当前: {len(self.current_units) if self.current_units else 0}, 需要: {len(current_units)}")
                 # 设置单元数据
                 self.current_units = current_units
                 self.uid = uid
@@ -1099,13 +1456,21 @@ class AccountDetailDialog(QDialog):
                 QTimer.singleShot(1000, lambda: self.complete_task_resume(task_type, task_config, unit_indices))
             else:
                 # 单元数据已加载，直接恢复任务
+                logger.info(f"单元数据已加载，直接恢复任务")
+                print(f"  ✅ 单元数据已加载，直接恢复任务")
                 self.fill_unit_list_with_resume_data(unit_indices, completed_units)
                 # 延迟恢复任务，确保UI更新完成
                 from PyQt5.QtCore import QTimer
                 QTimer.singleShot(500, lambda: self.complete_task_resume(task_type, task_config, unit_indices))
+                print(f"  ✅ 已安排500ms后完成任务恢复")
         except Exception as e:
             logger.error(f"恢复任务时发生错误: {str(e)}", exc_info=True)
             self.log(f"❌ 恢复任务失败: {str(e)}")
+            print(f"  ❌ 恢复任务时发生错误: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print(f"[AccountDetail] resume_task 完成\n")
     
     def fill_unit_list_with_resume_data(self, unit_indices, completed_units):
         """使用恢复数据填充单元列表"""
@@ -1150,7 +1515,16 @@ class AccountDetailDialog(QDialog):
                 self.mode_combo.setCurrentText("刷作业")
                 # 设置任务配置
                 if 'accuracy_config' in task_config:
-                    self.accuracy_spin.setValue(task_config['accuracy_config'])
+                    accuracy_config = task_config['accuracy_config']
+                    if isinstance(accuracy_config, tuple):
+                        # 正确率范围
+                        self.accuracy_range_checkbox.setChecked(True)
+                        self.accuracy_min_spin.setValue(accuracy_config[0])
+                        self.accuracy_max_spin.setValue(accuracy_config[1])
+                    else:
+                        # 固定正确率
+                        self.accuracy_range_checkbox.setChecked(False)
+                        self.accuracy_spin.setValue(accuracy_config)
                 if 'max_concurrent' in task_config:
                     self.homework_concurrent_spin.setValue(task_config['max_concurrent'])
             else:
@@ -1197,6 +1571,10 @@ class AccountDetailDialog(QDialog):
             
             logger.info(f"任务恢复准备完成 - 课程: {self.current_course['name']}, 任务类型: {task_type}")
             self.log(f"任务恢复准备完成，正在开始执行...")
+            
+            # 重置恢复任务标志
+            self.need_resume_task = False
+            logger.info(f"已重置恢复任务标志")
         except Exception as e:
             logger.error(f"完成任务恢复时发生错误: {str(e)}", exc_info=True)
             self.log(f"❌ 任务恢复失败: {str(e)}")
@@ -1259,7 +1637,14 @@ class AccountDetailDialog(QDialog):
             self.progress_bar.setRange(0, 0)  # 不确定进度
             
             if mode == "刷作业":
-                accuracy_config = self.accuracy_spin.value()
+                # 根据复选框状态决定正确率配置
+                if self.accuracy_range_checkbox.isChecked():
+                    # 使用正确率范围
+                    accuracy_config = (self.accuracy_min_spin.value(), self.accuracy_max_spin.value())
+                else:
+                    # 使用固定正确率
+                    accuracy_config = self.accuracy_spin.value()
+                
                 homework_concurrent = self.homework_concurrent_spin.value()
                 
                 self.log(f"恢复刷作业任务 (已选 {len(units_to_process)} 个单元, {homework_concurrent} 并发)...")
@@ -1279,11 +1664,8 @@ class AccountDetailDialog(QDialog):
                 )
                 
                 # 连接信号
-                self.study_thread.progress_updated.connect(self.update_progress)
-                self.study_thread.status_updated.connect(self.update_status)
-                self.study_thread.log_message.connect(self.log)
-                self.study_thread.finished.connect(self.on_study_finished)
-                self.study_thread.error_occurred.connect(self.on_study_error)
+                self.study_thread.progress_update.connect(self.handle_progress_update)
+                self.study_thread.study_finished.connect(self.on_study_finished)
                 
                 # 保存任务进度
                 self.save_task_progress(task_id, "刷作业", units_to_process, {
@@ -1326,11 +1708,8 @@ class AccountDetailDialog(QDialog):
                 )
                 
                 # 连接信号
-                self.study_thread.progress_updated.connect(self.update_progress)
-                self.study_thread.status_updated.connect(self.update_status)
-                self.study_thread.log_message.connect(self.log)
-                self.study_thread.finished.connect(self.on_study_finished)
-                self.study_thread.error_occurred.connect(self.on_study_error)
+                self.study_thread.progress_update.connect(self.handle_progress_update)
+                self.study_thread.study_finished.connect(self.on_study_finished)
                 
                 # 保存任务进度
                 self.save_task_progress(task_id, "刷时长", units_to_process, {
@@ -1380,7 +1759,8 @@ class AccountDetailDialog(QDialog):
             current_units=self.current_units,
             completed_units=[],  # 初始时没有完成的单元
             completed_courses={0: []},  # 初始时没有完成的课程
-            task_config=task_config
+            task_config=task_config,
+            username=self.account.username  # 传递username
         )
         
         if success:
@@ -1389,3 +1769,90 @@ class AccountDetailDialog(QDialog):
             logger.error(f"任务进度保存失败 - 任务ID: {task_id}")
         
         return success
+
+    # ========== 学习统计相关 ==========
+    
+    def get_user_id(self):
+        """获取用户ID"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+
+        if not self.is_logged_in:
+            logger.warning("未登录，无法获取用户ID")
+            return
+
+        if self.uid:
+            logger.info(f"用户ID已存在: {self.uid}")
+            return
+
+        logger.info(f"开始获取用户ID - 账号: {self.account.username}")
+        self.log("正在获取用户ID...")
+
+        try:
+            success, uid, message = self.client.get_user_id()
+            if success:
+                self.uid = uid
+                self.log(f"✅ 用户ID: {uid}")
+                logger.info(f"获取用户ID成功 - {uid}")
+
+                # 更新UI显示
+                if hasattr(self, 'user_id_label'):
+                    self.user_id_label.setText(f"用户ID: {uid}")
+            else:
+                self.log(f"❌ 获取用户ID失败: {message}")
+                logger.error(f"获取用户ID失败 - {message}")
+        except Exception as e:
+            self.log(f"❌ 获取用户ID异常: {str(e)}")
+            logger.error(f"获取用户ID异常: {str(e)}")
+
+    def fetch_user_study_stats(self):
+        """获取用户总体学习统计"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+
+        if not self.is_logged_in:
+            logger.warning("未登录，无法获取学习统计")
+            return
+
+        if not self.uid:
+            logger.warning("未获取到用户ID，先获取用户ID")
+            self.get_user_id()
+            # 延迟一下再获取统计
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(500, self.fetch_user_study_stats)
+            return
+
+        logger.info(f"开始获取学习统计 - 账号: {self.account.username}, UID: {self.uid}")
+        self.log("正在获取学习统计...")
+
+        # 创建获取学习统计的线程
+        self.stats_thread = workers.UserStatsThread(self.client)
+        self.stats_thread.stats_result.connect(self.on_stats_result)
+        self.stats_thread.status_updated.connect(self.update_status)
+        self.stats_thread.log_message.connect(self.log)
+        self.stats_thread.start()
+
+    def on_stats_result(self, success: bool, stats_data: dict, message: str):
+        """学习统计结果回调"""
+        from core.logger import get_logger
+        logger = get_logger("AccountDetail")
+
+        if success:
+            # 提取关键信息（根据实际API返回结构调整）
+            total_time = stats_data.get('totalStudyTime') or stats_data.get('total_time')
+            today_time = stats_data.get('todayStudyTime') or stats_data.get('today_time')
+
+            # 更新UI显示
+            if hasattr(self, 'total_time_label') and total_time:
+                self.total_time_label.setText(f"累计学习: {total_time}")
+
+            if hasattr(self, 'today_time_label') and today_time:
+                self.today_time_label.setText(f"今日学习: {today_time}")
+
+            self.log(f"✅ 学习统计 - 累计: {total_time}, 今日: {today_time}")
+            logger.info(f"获取学习统计成功 - 累计: {total_time}, 今日: {today_time}")
+        else:
+            self.log(f"❌ 获取学习统计失败: {message}")
+            logger.error(f"获取学习统计失败: {message}")
+
+

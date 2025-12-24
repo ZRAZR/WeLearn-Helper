@@ -43,7 +43,7 @@ class WeLearnUI(QMainWindow):
         self.detail_dialogs = {}  # 存储打开的详情对话框
         self.tray_icon = None     # 系统托盘图标
         self.tray_reminder_timer = None  # 托盘提醒定时器
-        self.version = "V5.0.8"     # 软件版本号
+        self.version = "V5.0.11"     # 软件版本号
         self.init_ui()
         self.init_tray()  # 初始化系统托盘
         
@@ -72,27 +72,23 @@ class WeLearnUI(QMainWindow):
         QTimer.singleShot(100, self.check_incomplete_tasks)
     
     def init_ui(self):
-        self.setWindowTitle("ZR | WeLearn学习助手 V5.0.8    致力于把大学生的时间还给大学生")
+        self.setWindowTitle("ZR | WeLearn学习助手 V5.0.11    致力于把大学生的时间还给大学生")
         self.setGeometry(100, 100, 900, 600)
         self.setMinimumSize(800, 500)
         
-        # 使用统一的路径获取方法
-        app_path = self.get_background_path()
-        if app_path is None:
-            # 如果无法获取背景图片路径，使用当前目录
-            app_path = os.path.dirname(os.path.abspath(__file__))
-            print(f"使用默认目录: {app_path}")
-        else:
-            app_path = os.path.dirname(app_path)  # 获取目录而不是文件
+        # 获取应用根目录
+        app_dir = self.get_app_directory()
         
-        icon_path = os.path.join(app_path, 'ZR.ico')
+        # 设置窗口图标
+        icon_path = os.path.join(app_dir, 'ZR.ico')
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
             print(f"已设置窗口图标: {icon_path}")
         else:
             print(f"图标文件不存在: {icon_path}")
         
-        bg_path = os.path.join(app_path, 'ZR.png')
+        # 设置背景图片
+        bg_path = os.path.join(app_dir, 'ZR.png')
         if os.path.exists(bg_path):
             palette = self.palette()
             pixmap = QPixmap(bg_path)
@@ -414,13 +410,24 @@ class WeLearnUI(QMainWindow):
     
     def resume_selected_task(self, task_list, incomplete_tasks, dialog):
         """恢复勾选的任务"""
+        print("\n" + "="*60)
+        print("🔍 开始 resume_selected_task")
+        print("="*60)
+        
         from core.logger import get_logger
         from PyQt5.QtWidgets import QMessageBox, QCheckBox
         
         logger = get_logger("MainWindow")
         
+        # 关闭对话框
+        print("✅ 准备关闭对话框")
+        dialog.accept()
+        print("✅ 对话框已关闭")
+        
         # 查找所有勾选的任务
         selected_indices = []
+        print(f"✅ 开始检查勾选的任务，总任务数: {len(incomplete_tasks)}")
+        
         for i in range(task_list.count()):
             item = task_list.item(i)
             item_widget = task_list.itemWidget(item)
@@ -431,13 +438,22 @@ class WeLearnUI(QMainWindow):
                     task_index = checkbox.property("task_index")
                     if task_index is not None and task_index < len(incomplete_tasks):
                         selected_indices.append(task_index)
+                        task_data = incomplete_tasks[task_index]
+                        task_id = task_data.get('task_id', '未知ID')
+                        username = task_data.get('username', '未知用户')
+                        print(f"✅ 选中任务: {task_id} (用户: {username})")
         
         if not selected_indices:
+            print("❌ 没有选中的任务")
             QMessageBox.warning(dialog, "提示", "请至少勾选一个任务！")
+            logger.info("没有选择要继续的任务")
             return
+        
+        print(f"准备恢复 {len(selected_indices)} 个任务")
         
         # 如果选择了多个任务，只恢复第一个（因为一次只能运行一个任务）
         if len(selected_indices) > 1:
+            print(f"⚠️ 选择了多个任务({len(selected_indices)}个)，只恢复第一个")
             reply = QMessageBox.question(
                 dialog, 
                 "确认", 
@@ -445,18 +461,31 @@ class WeLearnUI(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply != QMessageBox.Yes:
+                print("❌ 用户取消多任务恢复")
                 return
         
         selected_index = selected_indices[0]
         selected_task = incomplete_tasks[selected_index]
+        task_id = selected_task.get('task_id', '未知ID')
+        username = selected_task.get('username', '未知用户')
         
-        # 关闭对话框
-        dialog.accept()
+        print(f"\n--- 处理任务 ---")
+        print(f"任务数据: {selected_task}")
+        print(f"任务ID: {task_id}")
+        print(f"用户名: {username}")
+        
+        logger.info(f"选择了任务 {task_id} 进行恢复")
         
         # 恢复选中的任务
         try:
+            print(f"✅ 准备调用 resume_task")
             self.resume_task(selected_task, None)
+            print(f"✅ 已调用 resume_task")
         except Exception as e:
+            print(f"❌ 恢复任务时发生错误: {e}")
+            import traceback
+            traceback.print_exc()
+            
             import traceback
             error_msg = f"继续任务时发生错误: {str(e)}\n\n详细信息:\n{traceback.format_exc()}"
             logger.error(f"恢复任务失败: {error_msg}")
@@ -483,6 +512,10 @@ class WeLearnUI(QMainWindow):
                 error_dialog.setText("错误信息已保留，您可以复制错误信息")
                 error_dialog.setDetailedText(error_msg)
                 error_dialog.exec_()
+        
+        print("="*60)
+        print("🔍 resume_selected_task 执行完成")
+        print("="*60 + "\n")
     
     def resume_task(self, task_data, dialog):
         """恢复任务
@@ -506,14 +539,25 @@ class WeLearnUI(QMainWindow):
             logger.error("任务ID为空，无法恢复任务")
             return
         
-        # 从任务ID中提取用户名
-        # 假设任务ID格式为: username_cid_uid_tasktype
-        parts = task_id.split('_')
-        if len(parts) < 4:
-            logger.error(f"任务ID格式不正确: {task_id}")
-            return
+        # 🔧 现在可以使用保存的username字段
+        username = task_data.get('username')
         
-        username = parts[0]
+        # 添加调试信息
+        logger.info(f"任务数据完整内容: {task_data}")
+        logger.info(f"提取的username: {username}")
+        
+        if not username:
+            logger.error(f"任务数据中缺少username: {task_data}")
+            # 尝试从task_id中解析作为备用方案
+            task_id = task_data.get('task_id', '')
+            if '_' in task_id:
+                parts = task_id.split('_')
+                if len(parts) >= 2:
+                    username = parts[0]
+                    logger.warning(f"使用备用方案从task_id解析username: {username}")
+            else:
+                logger.error(f"无法从task_id解析username: {task_id}")
+                return
         
         # 获取账号管理器
         account_manager = AccountManager()
@@ -577,6 +621,12 @@ class WeLearnUI(QMainWindow):
             account: 账号对象
             resume_task_data: 恢复任务数据
         """
+        print("\n" + "-"*50)
+        print("🔍 开始 open_account_detail_with_resume")
+        print(f"账号: {account.username}")
+        print(f"任务数据: {resume_task_data}")
+        print("-"*50)
+        
         from core.logger import get_logger
         logger = get_logger("MainWindow")
         
@@ -586,22 +636,35 @@ class WeLearnUI(QMainWindow):
         if username in self.detail_dialogs:
             dialog = self.detail_dialogs[username]
             if dialog.isVisible():
+                print(f"⚠️ 详情页已存在，激活窗口")
                 dialog.raise_()
                 dialog.activateWindow()
                 logger.info(f"账号详情对话框已存在且可见，激活窗口 - 用户名: {username}")
                 return
             else:
+                print(f"⚠️ 详情页存在但不可见，删除旧实例")
                 del self.detail_dialogs[username]
         
         # 创建账号详情对话框并传递恢复任务数据
-        dialog = AccountDetailDialog(account, self, resume_task_data=resume_task_data)
+        print(f"✅ 创建新的 AccountDetailDialog")
+        try:
+            dialog = AccountDetailDialog(account, self, resume_task_data=resume_task_data)
+            print(f"✅ 对话框创建成功")
+        except Exception as e:
+            print(f"❌ 创建对话框失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+        
         dialog.status_updated.connect(self.on_account_status_updated)
         dialog.finished.connect(lambda result, u=username: self.on_detail_closed(u))
         
         self.detail_dialogs[username] = dialog
         
         # 显示对话框并确保它在前台
+        print(f"✅准备显示对话框")
         dialog.show()
+        print(f"✅ 对话框已调用show()")
         
         # 使用定时器多次确保对话框在前台
         from PyQt5.QtCore import QTimer
@@ -611,6 +674,9 @@ class WeLearnUI(QMainWindow):
         
         self.status_bar.showMessage(f"已打开账号详情: {username} (恢复任务)")
         logger.info(f"账号详情对话框已打开 - 用户名: {username}")
+        
+        print(f"✅ open_account_detail_with_resume 执行完成")
+        print("-"*50 + "\n")
     
     def _ensure_dialog_foreground(self, dialog):
         """确保对话框在前台显示"""
@@ -633,43 +699,38 @@ class WeLearnUI(QMainWindow):
             logger = get_logger("MainWindow")
             logger.error(f"确保对话框在前台显示时出错: {str(e)}")
     
-    def get_background_path(self):
-        """获取背景图片路径（考虑打包后的环境）"""
+    def get_app_directory(self):
+        """获取应用根目录（考虑打包后的环境）"""
         if getattr(sys, 'frozen', False):
             # 打包后的环境
             if hasattr(sys, '_MEIPASS'):
                 # PyInstaller临时目录
                 app_path = sys._MEIPASS
-                background_path = os.path.join(app_path, 'ZR.png')
-                print(f"PyInstaller临时目录背景图片路径: {background_path}")
-                if os.path.exists(background_path):
-                    return background_path
+                print(f"PyInstaller临时目录: {app_path}")
+                return app_path
             
             # 尝试从可执行文件目录获取
             app_path = os.path.dirname(sys.executable)
-            background_path = os.path.join(app_path, 'ZR.png')
-            print(f"可执行文件目录背景图片路径: {background_path}")
-            if os.path.exists(background_path):
-                return background_path
+            print(f"可执行文件目录: {app_path}")
             
-            # 尝试从_internal目录获取
+            # 检查图标文件是否在当前目录
+            icon_path = os.path.join(app_path, 'ZR.ico')
+            if os.path.exists(icon_path):
+                return app_path
+                
+            # 如果不在当前目录，尝试_internal目录（PyInstaller新版本）
             internal_path = os.path.join(app_path, '_internal')
-            background_path = os.path.join(internal_path, 'ZR.png')
-            print(f"内部目录背景图片路径: {background_path}")
-            if os.path.exists(background_path):
-                return background_path
+            if os.path.exists(os.path.join(internal_path, 'ZR.ico')):
+                print(f"使用_internal目录: {internal_path}")
+                return internal_path
+                
+            return app_path
         else:
-            # 开发环境
-            app_path = os.path.dirname(os.path.abspath(__file__))
-            app_path = os.path.dirname(app_path)
-            background_path = os.path.join(app_path, 'ZR.png')
-            print(f"开发环境背景图片路径: {background_path}")
-            if os.path.exists(background_path):
-                return background_path
-        
-        # 如果所有路径都无效，返回None
-        print("无法找到背景图片文件")
-        return None
+            # 开发环境，返回项目根目录
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            parent_dir = os.path.dirname(current_dir)
+            print(f"开发环境项目根目录: {parent_dir}")
+            return parent_dir
 
     def show_startup_warning(self):
         """显示启动警告"""
@@ -679,8 +740,9 @@ class WeLearnUI(QMainWindow):
         # 移除问号帮助按钮
         msg_box.setWindowFlags(msg_box.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         
-        # 获取背景图片路径（考虑打包后的环境）
-        background_path = self.get_background_path()
+        # 获取应用目录（考虑打包后的环境）
+        app_dir = self.get_app_directory()
+        background_path = os.path.join(app_dir, 'ZR.png')
         print(f"启动警告获取到的背景图片路径: {background_path}")
         
         if background_path and os.path.exists(background_path):
@@ -738,7 +800,7 @@ class WeLearnUI(QMainWindow):
         
         warning_text = """版权声明：
 
-本软件为WeLearn学习助手V5.0.6版本，由ZR修改并打包。
+本软件为WeLearn学习助手V5.0.11版本，由ZR修改并打包。
 
 使用条款：
 1. 本软件仅供学习交流使用，严禁用于任何商业用途
@@ -793,7 +855,7 @@ class WeLearnUI(QMainWindow):
         dont_show = settings.value("General/dont_show_update_announcement", False, type=bool)
         announcement_shown = settings.value("General/announcement_shown", False, type=bool)
         last_version = settings.value("General/last_version", "", type=str)
-        current_version = "V5.0.7"  # 更新当前版本号
+        current_version = "V5.0.11"  # 更新当前版本号
         
         print(f"更新公告设置: 不再提醒={dont_show}")
         print(f"公告已显示={announcement_shown}")
@@ -829,7 +891,8 @@ class WeLearnUI(QMainWindow):
         dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         
         # 设置背景图片 - 使用更可靠的方法
-        background_path = self.get_background_path()
+        app_dir = self.get_app_directory()
+        background_path = os.path.join(app_dir, 'ZR.png')
         print(f"获取到的背景图片路径: {background_path}")
         
         # 创建主布局
@@ -846,6 +909,17 @@ class WeLearnUI(QMainWindow):
 
         
         # 最新更新公告
+        announcement_content += "V5.0.11\n"
+        announcement_content += "-修复了刷时长完成后显示的已完成数量不正确的问题\n"
+        announcement_content += "-新增了正确率范围波动功能，允许设置正确率在指定范围内随机变化\n"
+        announcement_content += "-优化了任务完成统计显示，现在正确显示已完成单元数量\n"
+        announcement_content += "-更新了版本号到V5.0.11\n\n"
+        
+        announcement_content += "V5.0.9\n"
+        announcement_content += "-修复了UnitsThread初始化参数错误\n"
+        announcement_content += "-修复了UI背景图显示问题\n"
+        announcement_content += "-更新了版本号到V5.0.9\n\n"
+        
         announcement_content += "V5.0.7\n"
         announcement_content += "-修复了继续任务功能无法打开详情页的问题\n"
         announcement_content += "-优化了任务恢复流程，确保课程和单元数据加载完成后再恢复任务\n"
@@ -1379,27 +1453,8 @@ class WeLearnUI(QMainWindow):
     def create_tray_icon(self):
         """创建托盘图标"""
         # 使用统一的路径获取方法
-        icon_path = self.get_background_path()
-        
-        # 如果get_background_path返回None，使用备用路径
-        if icon_path is None:
-            if getattr(sys, 'frozen', False):
-                # 打包后的环境，尝试从可执行文件目录获取
-                app_path = os.path.dirname(sys.executable)
-                icon_path = os.path.join(app_path, 'ZR.ico')
-                
-                # 如果还是找不到，尝试从_internal目录获取
-                if not os.path.exists(icon_path):
-                    internal_path = os.path.join(app_path, '_internal')
-                    icon_path = os.path.join(internal_path, 'ZR.ico')
-            else:
-                # 开发环境
-                app_path = os.path.dirname(os.path.abspath(__file__))
-                app_path = os.path.dirname(app_path)
-                icon_path = os.path.join(app_path, 'ZR.ico')
-        else:
-            # 从背景图片路径获取图标路径
-            icon_path = os.path.join(os.path.dirname(icon_path), 'ZR.ico')
+        app_dir = self.get_app_directory()
+        icon_path = os.path.join(app_dir, 'ZR.ico')
         
         if os.path.exists(icon_path):
             icon = QIcon(icon_path)
@@ -1610,7 +1665,8 @@ class WeLearnUI(QMainWindow):
         super().resizeEvent(event)
         
         # 使用统一的路径获取方法
-        bg_path = self.get_background_path()
+        app_dir = self.get_app_directory()
+        bg_path = os.path.join(app_dir, 'ZR.png')
         if bg_path and os.path.exists(bg_path):
             palette = self.palette()
             pixmap = QPixmap(bg_path)

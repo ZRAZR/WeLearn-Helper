@@ -1,11 +1,13 @@
 from PyQt5.QtCore import QThread, pyqtSignal
 import random
 from core.api import WeLearnClient
+from core.task_progress import TaskProgress
 
 class LoginThread(QThread):
     """登录线程"""
-
-    login_result = pyqtSignal(bool, str)
+    login_result = pyqtSignal(bool, str, str)  # 修改：添加用户ID
+    status_updated = pyqtSignal(str)
+    log_message = pyqtSignal(str)
 
     def __init__(self, client: WeLearnClient, username, password):
         super().__init__()
@@ -14,8 +16,29 @@ class LoginThread(QThread):
         self.password = password
 
     def run(self):
-        success, message = self.client.login(self.username, self.password)
-        self.login_result.emit(success, message)
+        from core.logger import get_logger
+        logger = get_logger("LoginThread")
+
+        try:
+            self.status_updated.emit("正在登录...")
+            self.log_message.emit(f"开始登录账号: {self.username}")
+
+            success, message, uid = self.client.login(self.username, self.password)
+
+            if success:
+                self.log_message.emit(f"登录成功 - {message}")
+                if uid:
+                    self.log_message.emit(f"用户ID: {uid}")
+                else:
+                    self.log_message.emit("未能获取用户ID")
+            else:
+                self.log_message.emit(f"登录失败 - {message}")
+
+            self.login_result.emit(success, message, uid or "")
+
+        except Exception as e:
+            self.log_message.emit(f"登录异常: {str(e)}")
+            self.login_result.emit(False, str(e), "")
 
 
 class CourseThread(QThread):
@@ -34,8 +57,9 @@ class CourseThread(QThread):
 
 class UnitsThread(QThread):
     """获取单元线程"""
-
-    units_result = pyqtSignal(bool, list, str)
+    units_result = pyqtSignal(bool, dict, str)  # success, data, message
+    status_updated = pyqtSignal(str)
+    log_message = pyqtSignal(str)
 
     def __init__(self, client: WeLearnClient, cid):
         super().__init__()
@@ -43,11 +67,36 @@ class UnitsThread(QThread):
         self.cid = cid
 
     def run(self):
-        success, data, message = self.client.get_course_info(self.cid)
-        if success:
-            self.units_result.emit(True, [data], message)
-        else:
-            self.units_result.emit(False, [], message)
+        from core.logger import get_logger
+        logger = get_logger("UnitsThread")
+
+        try:
+            self.status_updated.emit("正在获取单元...")
+            self.log_message.emit(f"开始获取课程 {self.cid} 的单元")
+
+            # 需要uid和classid，从client获取
+            uid = self.client.uid
+            if not uid:
+                # 如果没有uid，尝试获取
+                success, uid, message = self.client.get_user_id()
+                if not success:
+                    self.units_result.emit(False, {}, f"无法获取用户ID: {message}")
+                    self.log_message.emit(f"获取用户ID失败: {message}")
+                    return
+
+            # 获取课程信息，包含uid和classid
+            success, course_info, message = self.client.get_course_info(self.cid)
+
+            if success:
+                self.units_result.emit(True, course_info, "获取单元成功")
+                self.log_message.emit(f"获取单元成功: {len(course_info.get('units', []))} 个单元")
+            else:
+                self.units_result.emit(False, {}, message)
+                self.log_message.emit(f"获取单元失败: {message}")
+
+        except Exception as e:
+            self.units_result.emit(False, {}, str(e))
+            self.log_message.emit(f"获取单元异常: {str(e)}")
 
 
 class StudyThread(QThread):
@@ -57,7 +106,7 @@ class StudyThread(QThread):
     study_finished = pyqtSignal(dict)
 
     def __init__(
-        self, client: WeLearnClient, cid, uid, classid, unit_idx, accuracy_config, current_units, max_concurrent=5
+        self, client: WeLearnClient, cid, uid, classid, unit_idx, accuracy_config, current_units, max_concurrent=5, username=None, task_id=None
     ):
         super().__init__()
         self.client = client
@@ -69,6 +118,11 @@ class StudyThread(QThread):
         self.current_units = current_units
         self.max_concurrent = max_concurrent  # 最大并发数
         self._stop_flag = False
+        self.username = username  # 用户名，用于任务进度保存
+        self.task_id = task_id  # 任务ID，用于任务进度保存
+        self.progress_manager = TaskProgress()  # 任务进度管理器
+        self.completed_units = []  # 已完成的单元索引
+        self.completed_courses = {}  # 每个单元已完成的课程ID列表
 
 
 
@@ -211,13 +265,15 @@ class StudyThread(QThread):
             unit_indices = self.unit_idx if isinstance(self.unit_idx, list) else [self.unit_idx]
             logger.info(f"开始处理 {len(unit_indices)} 个单元")
             
+            # 初始化已完成课程字典
+            for unit_index in unit_indices:
+                self.completed_courses[unit_index] = []
+            
             for unit_index in unit_indices:
                 if self._stop_flag:
                     logger.info("检测到停止标志，终止任务执行")
                     break
                 
-
-                    
                 logger.info(f"开始处理单元 {unit_index + 1}")
                 self.progress_update.emit(
                     "unit_start", f"\n=== 开始处理第 {unit_index + 1} 单元 ==="
@@ -228,12 +284,22 @@ class StudyThread(QThread):
                 total_way2_succeed += result[2]
                 total_way2_failed += result[3]
                 
+                # 标记单元为已完成
+                if unit_index not in self.completed_units:
+                    self.completed_units.append(unit_index)
+                
                 logger.info(f"单元 {unit_index + 1} 处理完成 - 步骤1成功: {result[0]}, 失败: {result[1]}, 步骤2成功: {result[2]}, 失败: {result[3]}")
                 self.progress_update.emit(
                     "unit_finish", f"=== 第 {unit_index + 1} 单元处理完成 ===\n"
                 )
-                
 
+            # 任务完成，清理进度记录
+            if self.task_id:
+                success = self.progress_manager.clear_task_progress(self.task_id)
+                if success:
+                    logger.info(f"任务 {self.task_id} 已完成，进度记录已清理")
+                else:
+                    logger.error(f"清理任务 {self.task_id} 的进度记录失败")
 
             result = {
                 "way1_succeed": total_way1_succeed,
@@ -250,12 +316,41 @@ class StudyThread(QThread):
             self.progress_update.emit("error", f"学习过程中发生错误: {str(e)}")
     
     def stop(self):
-        """停止学习"""
+        """停止学习并保存进度"""
         from core.logger import get_logger
         logger = get_logger("StudyThread")
         
         logger.info("收到停止刷作业任务请求")
         self._stop_flag = True
+        
+        # 保存任务进度
+        if self.task_id and self.username:
+            unit_indices = self.unit_idx if isinstance(self.unit_idx, list) else [self.unit_idx]
+            task_config = {
+                "accuracy_config": self.accuracy_config,
+                "max_concurrent": self.max_concurrent
+            }
+            
+            success = self.progress_manager.save_task_progress(
+                task_id=self.task_id,
+                task_type="刷作业",
+                cid=self.cid,
+                uid=self.uid,
+                classid=self.classid,
+                unit_indices=unit_indices,
+                current_units=self.current_units,
+                completed_units=self.completed_units,
+                completed_courses=self.completed_courses,
+                task_config=task_config,
+                username=self.username
+            )
+            
+            if success:
+                logger.info(f"任务进度已保存 - 任务ID: {self.task_id}")
+                self.progress_update.emit("info", f"任务进度已保存，下次启动时可继续")
+            else:
+                logger.error(f"任务进度保存失败 - 任务ID: {self.task_id}")
+                self.progress_update.emit("error", "任务进度保存失败")
         
         # 立即尝试终止线程
         if self.isRunning():
@@ -271,7 +366,7 @@ class TimeStudyThread(QThread):
 
     def __init__(
         self, client: WeLearnClient, cid, uid, classid, unit_idx, 
-        total_minutes, random_range, current_units, max_concurrent=10
+        total_minutes, random_range, current_units, max_concurrent=10, username=None, task_id=None
     ):
         super().__init__()
         self.client = client
@@ -284,6 +379,9 @@ class TimeStudyThread(QThread):
         self.current_units = current_units
         self.max_concurrent = max_concurrent
         self._stop_flag = False
+        self.username = username  # 用户名，用于任务进度保存
+        self.task_id = task_id  # 任务ID，用于任务进度保存
+        self.progress_manager = TaskProgress()  # 任务进度管理器
         
         # 进度跟踪
         self.completed_units = []
@@ -510,11 +608,24 @@ class TimeStudyThread(QThread):
 
             
             logger.info(f"刷时长任务完成 - 总计成功: {total_success}, 失败: {total_fail}")
+            
+            # 将所有单元标记为已完成
+            self.completed_units = self.unit_idx.copy()
+            
+            # 任务完成，清理进度记录
+            if self.task_id:
+                success = self.progress_manager.clear_task_progress(self.task_id)
+                if success:
+                    logger.info(f"刷时长任务 {self.task_id} 已完成，进度记录已清理")
+                else:
+                    logger.error(f"清理刷时长任务 {self.task_id} 的进度记录失败")
+            
             result = {
                 "way1_succeed": total_success,
                 "way1_failed": total_fail,
                 "way2_succeed": total_success,
                 "way2_failed": total_fail,
+                "completed_units": len(self.completed_units),  # 添加已完成的单元数量
             }
             self.study_finished.emit(result)
 
@@ -523,15 +634,80 @@ class TimeStudyThread(QThread):
             self.progress_update.emit("error", f"刷时长过程中发生错误: {str(e)}")
     
     def stop(self):
-        """停止刷时长"""
+        """停止刷时长并保存进度"""
         from core.logger import get_logger
         logger = get_logger("TimeStudyThread")
         
         logger.info("收到停止刷时长任务请求")
         self._stop_flag = True
         
+        # 保存任务进度
+        if self.task_id and self.username:
+            task_config = {
+                "total_minutes": self.total_minutes,
+                "random_range": self.random_range,
+                "max_concurrent": self.max_concurrent
+            }
+            
+            success = self.progress_manager.save_task_progress(
+                task_id=self.task_id,
+                task_type="刷时长",
+                cid=self.cid,
+                uid=self.uid,
+                classid=self.classid,
+                unit_indices=self.unit_idx,
+                current_units=self.current_units,
+                completed_units=self.completed_units,
+                completed_courses=self.completed_courses,
+                task_config=task_config,
+                username=self.username
+            )
+            
+            if success:
+                logger.info(f"任务进度已保存 - 任务ID: {self.task_id}")
+                self.progress_update.emit("info", f"任务进度已保存，下次启动时可继续")
+            else:
+                logger.error(f"任务进度保存失败 - 任务ID: {self.task_id}")
+                self.progress_update.emit("error", "任务进度保存失败")
+        
         # 立即尝试终止线程
         if self.isRunning():
             logger.info("尝试立即终止刷时长线程")
             self.terminate()
+
+
+
+
+
+class UserStatsThread(QThread):
+    """获取用户学习统计的线程"""
+    stats_result = pyqtSignal(bool, dict, str)  # success, stats_data, message
+    status_updated = pyqtSignal(str)
+    log_message = pyqtSignal(str)
+
+    def __init__(self, client: WeLearnClient):
+        super().__init__()
+        self.client = client
+
+    def run(self):
+        from core.logger import get_logger
+        logger = get_logger("UserStatsThread")
+
+        try:
+            self.status_updated.emit("正在获取学习统计...")
+            self.log_message.emit("开始获取用户学习统计信息")
+
+            # 调用WeLearnClient的方法
+            success, stats_data, message = self.client.get_user_study_stats()
+
+            if success:
+                self.stats_result.emit(True, stats_data, message)
+                self.log_message.emit(f"获取到学习统计: {stats_data}")
+            else:
+                self.stats_result.emit(False, {}, message)
+                self.log_message.emit(f"获取学习统计失败: {message}")
+
+        except Exception as e:
+            self.stats_result.emit(False, {}, str(e))
+            self.log_message.emit(f"获取学习统计异常: {str(e)}")
 

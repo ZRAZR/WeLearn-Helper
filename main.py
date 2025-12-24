@@ -1,30 +1,55 @@
 import sys
 import traceback
+from datetime import datetime
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from ui.main_window import WeLearnUI
 from core.logger import logger
 
 
-def exception_hook(exctype, value, tb):
-    """全局异常处理，防止程序闪退"""
-    error_msg = ''.join(traceback.format_exception(exctype, value, tb))
-    print(f"未捕获的异常:\n{error_msg}", file=sys.stderr)
+def global_exception_handler(type_, value, traceback_obj):
+    """全局异常捕获器"""
+    error_msg = ''.join(traceback.format_exception(type_, value, traceback_obj))
+    
+    # 打印到控制台（红色高亮）
+    print("\n" + "="*80)
+    print("🚨程序遇到错误！")
+    print("="*80)
+    print(error_msg)
+    print("="*80 + "\n")
+    
+    # 写入专门的错误文件
+    error_file = "error_crash.log"
+    with open(error_file, 'a', encoding='utf-8') as f:
+        f.write(f"\n{'='*80}\n")
+        f.write(f"时间: {datetime.now()}\n")
+        f.write(f"错误详情:\n{error_msg}\n")
+        f.write(f"{'='*80}\n")
     
     # 记录到日志
     logger.critical(f"未捕获的异常:\n{error_msg}")
     
-    # 显示错误对话框
-    msg_box = QMessageBox()
-    msg_box.setIcon(QMessageBox.Icon.Critical)
-    msg_box.setWindowTitle("程序错误")
-    msg_box.setText("程序发生错误，但不会退出")
-    msg_box.setDetailedText(error_msg)
-    msg_box.exec_()
+    # 弹窗提示用户
+    try:
+        app = QApplication.instance()
+        if app:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setWindowTitle("程序出错")
+            msg.setText("程序遇到错误，已保存到 error_crash.log")
+            msg.setDetailedText(error_msg[:1000])  # 只显示前1000字符
+            msg.exec_()
+    except:
+        pass
+
+
+def exception_hook(exctype, value, tb):
+    """兼容旧代码的异常处理"""
+    global_exception_handler(exctype, value, tb)
 
 
 def main():
     # 安装全局异常处理
-    sys.excepthook = exception_hook
+    sys.excepthook = global_exception_handler
     
     logger.info("启动WeLearn学习助手")
     

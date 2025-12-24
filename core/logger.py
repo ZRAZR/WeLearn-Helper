@@ -59,7 +59,7 @@ class Logger:
         
         # 记录启动日志
         self.logger.info("=" * 50)
-        self.logger.info("WeLearn学习助手V4.6.5 启动")
+        self.logger.info("WeLearn学习助手V5.0.11 启动")
         self.logger.info(f"日志文件路径: {log_file}")
         self.logger.info("=" * 50)
     
@@ -101,5 +101,54 @@ def get_logger(name=None):
         logging.Logger: 日志记录器实例
     """
     if name:
-        return logging.getLogger(name)
+        # 获取或创建指定名称的记录器
+        logger_instance = logging.getLogger(name)
+        
+        # 如果记录器还没有处理器，则添加与主记录器相同的处理器
+        if not logger_instance.handlers:
+            logger_instance.setLevel(logging.DEBUG)
+            
+            # 确定日志文件路径
+            if getattr(sys, 'frozen', False):
+                # 如果是打包后的可执行程序
+                if hasattr(sys, '_MEIPASS'):
+                    # PyInstaller打包
+                    app_dir = os.path.dirname(sys.executable)
+                else:
+                    # 其他打包方式
+                    app_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+            else:
+                # 源代码运行
+                app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            
+            # 创建logs目录（如果不存在）
+            logs_dir = os.path.join(app_dir, "logs")
+            if not os.path.exists(logs_dir):
+                os.makedirs(logs_dir, exist_ok=True)
+            
+            # 设置日志文件路径（按日期）
+            today = datetime.now().strftime("%Y-%m-%d")
+            log_file = os.path.join(logs_dir, f"WeLearnV4_{today}.log")
+            
+            # 创建文件处理器
+            file_handler = logging.FileHandler(log_file, encoding='utf-8')
+            file_handler.setLevel(logging.DEBUG)
+            
+            # 创建控制台处理器
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            
+            # 设置日志格式
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            file_handler.setFormatter(formatter)
+            console_handler.setFormatter(formatter)
+            
+            # 添加处理器到日志器
+            logger_instance.addHandler(file_handler)
+            logger_instance.addHandler(console_handler)
+        
+        return logger_instance
     return logger.logger
